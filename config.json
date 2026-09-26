@@ -1,0 +1,42 @@
+{
+  "launcher_games_dir": "D:\\Program Files\\miHoYo Launcher\\games",
+  "sampling": {
+    "interval_seconds": 20,
+    "ping_burst_count": 5,
+    "ping_timeout_ms": 1000,
+    "tcp_timeout_ms": 2000
+  },
+  "targets": {
+    "local_gateway": "auto",
+    "global_control": "1.1.1.1",
+    "asia_transit_control": "20.210.150.1",
+    "mihoyo_endpoints": [
+      {
+        "name": "Aliyun-AntiDDoS-1",
+        "host": "203.107.36.87",
+        "port": 443
+      },
+      {
+        "name": "Aliyun-AntiDDoS-2",
+        "host": "203.107.60.77",
+        "port": 443
+      },
+      {
+        "name": "Kunlun-CDN",
+        "host": "122.156.129.54",
+        "port": 80
+      }
+    ]
+  },
+  "anomaly_trigger": {
+    "loss_threshold_pct": 20.0,
+    "rtt_spike_threshold_ms": 80.0,
+    "trace_cooldown_seconds": 300,
+    "max_hops": 25
+  },
+  "paths": {
+    "log_file": "logs/connectivity.csv",
+    "trace_dir": "traces",
+    "report_dir": "reports"
+  }
+}

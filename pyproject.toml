@@ -1,0 +1,16 @@
+[project]
+name = "mihoyo-connectivity-diagnostics"
+version = "0.1.0"
+description = "Diagnostic suite and decision engine for miHoYo China game server connectivity"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+rich-cli = [
+    "rich>=13.0.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

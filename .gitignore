@@ -1,0 +1,29 @@
+# Python virtual environments
+.venv/
+env/
+venv/
+ENV/
+
+# Python cache & bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Diagnostic data and traces (keep folders via .gitkeep)
+logs/*.csv
+traces/*.txt
+reports/*.html
+reports/*.png
+
+# IDE & Editor folders
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS artifacts
+Thumbs.db
+ehthumbs.db
+[Dd]esktop.ini
+$RECYCLE.BIN/
