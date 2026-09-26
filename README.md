@@ -69,10 +69,15 @@ python find_game_ip.py --add-to-config
 ```
 
 ### 4. Start Continuous Monitoring
-Start the continuous monitoring probe (logs every 20 seconds to `logs\connectivity.csv`):
+Start the continuous monitoring probe. Each run automatically creates a timestamped log (e.g. `logs\connectivity_20260926_015444.csv`):
 
 ```powershell
 python monitor.py
+```
+
+To specify a custom log file instead:
+```powershell
+python monitor.py --log logs\my_session.csv
 ```
 
 #### Run Silently in the Background:
@@ -90,10 +95,28 @@ Stop-Process -Name "python"
 At any time (after collecting samples across a gaming session or peak hours), run:
 
 ```powershell
+# Analyzes the latest session log and generates a timestamped HTML dashboard
 python analyze.py --html
+
+# Or aggregate across ALL session logs in logs\ directory:
+python analyze.py --all --html
 ```
 
-This evaluates the telemetry data against the **Go / No-Go Decision Matrix**, prints a plain-English verdict, and generates a formatted HTML dashboard at `reports\summary.html`.
+This outputs:
+- A plain-English terminal verdict based on the **Go / No-Go Decision Matrix**.
+- A timestamped dashboard: `reports\summary_YYYYMMDD_HHMMSS.html`.
+- A persistent bookmark: `reports\summary_latest.html`.
+
+---
+
+## What is the `traces/` Directory?
+
+The `traces/` directory stores **event-triggered forensic traceroutes**:
+
+* **Why it exists:** Running a continuous hop-by-hop `tracert` every 20 seconds would consume bandwidth and take 30+ seconds per cycle. The monitor instead uses lightweight, sub-second pings and TCP probes normally.
+* **How it triggers:** When packet loss on miHoYo edge servers jumps to $\ge 20\%$ (or RTT $\ge 300\text{ms}$) while your local home network is completely clean, `monitor.py` detects a **severe cross-border routing degradation**.
+* **What it does:** It immediately fires an asynchronous background `tracert -d` to the degraded server IP and saves the full hop list into `traces\trace_YYYYMMDD_HHMMSS_<target>_<ip>.txt` (enforcing a 5-minute cooldown to avoid spamming).
+* **Forensic Value:** If you want proof of which specific router or ISP hop throttled or dropped your packets (e.g., Hop 12 at China Telecom's `202.97.*.*` 163 border gateway), you can open these trace snapshots to see the exact hop where latency multiplied or timeouts began.
 
 ---
 

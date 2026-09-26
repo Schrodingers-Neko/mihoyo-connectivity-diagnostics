@@ -194,14 +194,26 @@ def _run_tracert_thread(host: str, target_name: str, max_hops: int, trace_dir: P
 
 
 class NetworkMonitor:
-    def __init__(self, config_path: str = "config.json") -> None:
+    def __init__(self, config_path: str = "config.json", log_path: str | None = None) -> None:
         self.config_path = Path(config_path)
         self.config = self._load_config()
-        self.log_file = Path(self.config.get("paths", {}).get("log_file", "logs/connectivity.csv"))
         self.trace_dir = Path(self.config.get("paths", {}).get("trace_dir", "traces"))
         self.last_trace_time: dict[str, float] = {}
         self.global_last_trace_time: float = 0.0
         self.installed_games = discover_installed_games(self.config.get("launcher_games_dir"))
+
+        if log_path:
+            self.log_file = Path(log_path)
+        else:
+            paths_cfg = self.config.get("paths", {})
+            template = paths_cfg.get(
+                "log_file_template",
+                paths_cfg.get("log_file", "logs/connectivity_{timestamp}.csv"),
+            )
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            rendered = template.replace("{timestamp}", ts)
+            self.log_file = Path(rendered)
+
         self._init_csv()
 
     def _load_config(self) -> dict[str, Any]:
@@ -478,6 +490,12 @@ async def main_async() -> None:
         help="Path to configuration file (default: config.json).",
     )
     parser.add_argument(
+        "--log",
+        "-l",
+        default=None,
+        help="Custom path for CSV log file (default: logs/connectivity_<timestamp>.csv).",
+    )
+    parser.add_argument(
         "--test-once",
         "-t",
         action="store_true",
@@ -491,7 +509,7 @@ async def main_async() -> None:
     )
     args = parser.parse_args()
 
-    monitor = NetworkMonitor(config_path=args.config)
+    monitor = NetworkMonitor(config_path=args.config, log_path=args.log)
     interval = monitor.config.get("sampling", {}).get("interval_seconds", 20)
 
     if args.test_once:

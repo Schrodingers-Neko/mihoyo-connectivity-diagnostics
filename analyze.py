@@ -40,20 +40,48 @@ def safe_int(val: Any, default: int = 0) -> int:
         return default
 
 
+def find_log_files(log_path: str | None = None, log_dir: str = "logs", load_all: bool = False) -> list[Path]:
+    """Find specific log file, all log files, or the latest timestamped log file."""
+    if log_path:
+        p = Path(log_path)
+        return [p] if p.is_file() else []
+
+    dir_path = Path(log_dir)
+    if not dir_path.is_dir():
+        return []
+
+    files = list(dir_path.glob("connectivity*.csv"))
+    if not files:
+        legacy = dir_path / "connectivity.csv"
+        return [legacy] if legacy.is_file() else []
+
+    # Sort descending by modified time (latest first)
+    files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    if load_all:
+        return files
+    return [files[0]]
+
+
 class ConnectivityAnalyzer:
-    def __init__(self, log_path: str = "logs/connectivity.csv", trace_dir: str = "traces") -> None:
-        self.log_path = Path(log_path)
+    def __init__(
+        self,
+        log_path: str | None = None,
+        trace_dir: str = "traces",
+        load_all: bool = False,
+    ) -> None:
         self.trace_dir = Path(trace_dir)
+        self.source_files = find_log_files(log_path=log_path, load_all=load_all)
         self.records: list[dict[str, Any]] = []
         self._load_records()
 
     def _load_records(self) -> None:
-        if not self.log_path.is_file():
-            return
-        with open(self.log_path, "r", encoding="utf-8", errors="ignore") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                self.records.append({
+        for fpath in self.source_files:
+            if not fpath.is_file():
+                continue
+            with open(fpath, "r", encoding="utf-8", errors="ignore") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    self.records.append({
                     "timestamp_local": row.get("timestamp_local", ""),
                     "timestamp_cst": row.get("timestamp_cst", ""),
                     "cst_hour": safe_int(row.get("cst_hour")),
@@ -304,8 +332,13 @@ class ConnectivityAnalyzer:
         print(f"\nRecommended Action: {decision['action']}\n")
         print("=" * 78)
 
-    def generate_html_report(self, output_path: str = "reports/summary.html") -> Path:
-        out_file = Path(output_path)
+    def generate_html_report(self, output_path: str | None = None) -> tuple[Path, Path]:
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        if output_path:
+            out_file = Path(output_path)
+        else:
+            out_file = Path(f"reports/summary_{ts}.html")
+
         out_file.parent.mkdir(parents=True, exist_ok=True)
         stats = self.aggregate_by_target()
         decision = self.evaluate_decision_matrix()
@@ -332,6 +365,7 @@ class ConnectivityAnalyzer:
             """
 
         details_html = "".join(f"<li>{d}</li>" for d in decision["details"])
+        source_files_str = ", ".join(f.name for f in self.source_files) if self.source_files else "None"
 
         html_content = f"""<!DOCTYPE html>
 <html lang="en">
@@ -349,12 +383,16 @@ class ConnectivityAnalyzer:
   th {{ background: #0f172a; color: #94a3b8; font-size: 13px; text-transform: uppercase; letter-spacing: 0.05em; }}
   ul {{ padding-left: 20px; line-height: 1.6; color: #cbd5e1; }}
   .action-box {{ background: #0f172a; border-left: 4px solid #38bdf8; padding: 14px 18px; border-radius: 6px; margin-top: 16px; }}
+  .meta {{ color: #94a3b8; font-size: 14px; margin-bottom: 20px; }}
 </style>
 </head>
 <body>
 <div class="container">
   <h1>miHoYo China Connectivity Diagnostic Report</h1>
-  <p style="color:#94a3b8;">Generated on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} Local Time | Total Samples: {len(self.records)}</p>
+  <div class="meta">
+    Generated on: <strong>{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} Local Time</strong> | 
+    Source: <strong>{source_files_str}</strong> | Total Samples: <strong>{len(self.records)}</strong>
+  </div>
 
   <div class="card">
     <div style="display:flex; justify-content:space-between; align-items:center;">
@@ -391,7 +429,15 @@ class ConnectivityAnalyzer:
 </body>
 </html>"""
         out_file.write_text(html_content, encoding="utf-8")
-        return out_file
+
+        # Also write/update summary_latest.html for easy browser bookmarking
+        latest_file = out_file.parent / "summary_latest.html"
+        try:
+            latest_file.write_text(html_content, encoding="utf-8")
+        except Exception:
+            pass
+
+        return out_file, latest_file
 
 
 def main() -> None:
@@ -401,27 +447,42 @@ def main() -> None:
     parser.add_argument(
         "--log",
         "-l",
-        default="logs/connectivity.csv",
-        help="Path to CSV log file (default: logs/connectivity.csv).",
+        default=None,
+        help="Path to specific CSV log file (default: auto-detect latest logs/connectivity_*.csv).",
+    )
+    parser.add_argument(
+        "--all",
+        "-a",
+        action="store_true",
+        help="Aggregate data across ALL CSV logs in logs/ directory.",
     )
     parser.add_argument(
         "--html",
         action="store_true",
-        help="Generate HTML report in reports/summary.html.",
+        help="Generate timestamped HTML report in reports/summary_<timestamp>.html (and reports/summary_latest.html).",
     )
     parser.add_argument(
         "--output-html",
-        default="reports/summary.html",
-        help="Custom path for HTML report (default: reports/summary.html).",
+        default=None,
+        help="Custom path for HTML report.",
     )
     args = parser.parse_args()
 
-    analyzer = ConnectivityAnalyzer(log_path=args.log)
+    analyzer = ConnectivityAnalyzer(log_path=args.log, load_all=args.all)
+    if not analyzer.source_files:
+        print("No connectivity log files found in logs/ directory.")
+        print("Run `python monitor.py` first to collect diagnostic data.")
+        return
+
+    src_names = ", ".join(f.name for f in analyzer.source_files)
+    print(f"[Loading telemetry from: {src_names}]")
+
     analyzer.print_terminal_report()
 
     if args.html:
-        path = analyzer.generate_html_report(output_path=args.output_html)
-        print(f"HTML report successfully generated at: {path}")
+        path, latest = analyzer.generate_html_report(output_path=args.output_html)
+        print(f"Timestamped HTML report generated: {path}")
+        print(f"Latest report bookmark updated:    {latest}")
 
 
 if __name__ == "__main__":

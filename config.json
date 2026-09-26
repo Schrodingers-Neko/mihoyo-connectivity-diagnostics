@@ -35,8 +35,9 @@
     "max_hops": 25
   },
   "paths": {
-    "log_file": "logs/connectivity.csv",
+    "log_file_template": "logs/connectivity_{timestamp}.csv",
     "trace_dir": "traces",
-    "report_dir": "reports"
+    "report_dir": "reports",
+    "report_file_template": "reports/summary_{timestamp}.html"
   }
 }
