@@ -217,7 +217,13 @@ class ConnectivityAnalyzer:
         local_jitter = local_stat.get("avg_jitter_ms", 0.0)
         global_loss = global_stat.get("loss_pct", 0.0)
 
-        mihoyo_stats = [v for k, v in stats.items() if v["target_type"].startswith("mihoyo")]
+        # Exclude legacy or firewalled UDP game targets that drop ICMP pings by design (100% loss with no RTT)
+        mihoyo_stats = [
+            v for k, v in stats.items()
+            if v["target_type"].startswith("mihoyo")
+            and not (v["target_type"] == "mihoyo_live_game" and "-UDP" in k)
+            and not (v["target_type"] == "mihoyo_live_game" and v["loss_pct"] >= 100.0 and v["avg_rtt_ms"] < 0)
+        ]
         if not mihoyo_stats:
             return {
                 "verdict": "NO_MIHOYO_TARGETS",
@@ -428,7 +434,11 @@ class ConnectivityAnalyzer:
         print(s_line)
 
         for name, s in stats.items():
-            rtt_str = f"{s['avg_rtt_ms']} ms" if s["avg_rtt_ms"] >= 0 else "TIMEOUT"
+            rtt_str = (
+                f"{s['avg_rtt_ms']} ms"
+                if s["avg_rtt_ms"] >= 0
+                else ("ICMP BLOCKED" if "-UDP" in name else "TIMEOUT")
+            )
             jitter_str = f"{s['avg_jitter_ms']} ms" if s["avg_jitter_ms"] >= 0 else "-"
             tcp_str = f"{s['tcp_rate']:.0f}%" if s["tcp_rate"] >= 0 else "N/A"
             peak_str = f"{s['peak_loss']:.1f}% ({s['peak_samples']})"
@@ -500,7 +510,11 @@ class ConnectivityAnalyzer:
 
         rows_html = ""
         for name, s in stats.items():
-            rtt = f"{s['avg_rtt_ms']} ms" if s["avg_rtt_ms"] >= 0 else "TIMEOUT"
+            rtt = (
+                f"{s['avg_rtt_ms']} ms"
+                if s["avg_rtt_ms"] >= 0
+                else ("ICMP BLOCKED" if "-UDP" in name else "TIMEOUT")
+            )
             jitter = f"{s['avg_jitter_ms']} ms" if s["avg_jitter_ms"] >= 0 else "-"
             loss_color = "#10b981" if s["loss_pct"] < 5 else ("#f59e0b" if s["loss_pct"] < 15 else "#ef4444")
             tcp_display = f"{s['tcp_rate']:.0f}%" if s["tcp_rate"] >= 0 else "N/A"

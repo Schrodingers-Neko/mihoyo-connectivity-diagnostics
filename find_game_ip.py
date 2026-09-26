@@ -176,10 +176,12 @@ def main() -> None:
         added_count = 0
         for c in connections:
             if c["remote_ip"] not in ("127.0.0.1", "0.0.0.0"):
+                if c["protocol"] != "TCP":
+                    print(f"Skipping UDP combat socket {c['remote_ip']}:{c['remote_port']} (combat nodes drop ICMP/TCP probes).")
+                    continue
                 clean_name = c["game_name"].split()[0]
-                name = f"{clean_name}-{c['protocol']}-{c['remote_port']}"
-                # TCP endpoints use their actual port; UDP endpoints use port 0 to prevent bogus TCP connection attempts
-                port = c["remote_port"] if c["protocol"] == "TCP" else 0
+                name = f"{clean_name}-TCP-{c['remote_port']}"
+                port = c["remote_port"]
                 if add_endpoint_to_config(name, c["remote_ip"], port, args.config):
                     added_count += 1
         if added_count:

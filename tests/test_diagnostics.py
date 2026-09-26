@@ -324,6 +324,115 @@ class TestDecisionMatrix(unittest.TestCase):
             self.assertNotIn("<script>alert(1)</script>", content)
             self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", content)
 
+    def test_legacy_udp_rows_ignored_in_decision_matrix(self):
+        """Historical 100% loss UDP rows must not trigger false BUY_ACCELERATOR."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            rows = []
+            for i in range(6):
+                # Clean local gateway
+                rows.append({
+                    "timestamp_local": f"2026-09-26 12:00:0{i}",
+                    "timestamp_cst": f"2026-09-27 00:00:0{i}",
+                    "cst_hour": 0,
+                    "is_cst_peak": False,
+                    "active_game": "None",
+                    "target_name": "Local-Gateway",
+                    "target_host": "192.168.1.1",
+                    "target_type": "control_local",
+                    "packets_sent": 5,
+                    "packets_recv": 5,
+                    "loss_pct": 0.0,
+                    "min_rtt_ms": 1.0,
+                    "avg_rtt_ms": 1.0,
+                    "max_rtt_ms": 1.0,
+                    "jitter_ms": 0.0,
+                    "tcp_port": 0,
+                    "tcp_success": False,
+                    "tcp_handshake_ms": -1.0,
+                    "anomaly_triggered": False,
+                })
+                # Clean edge node
+                rows.append({
+                    "timestamp_local": f"2026-09-26 12:00:0{i}",
+                    "timestamp_cst": f"2026-09-27 00:00:0{i}",
+                    "cst_hour": 0,
+                    "is_cst_peak": False,
+                    "active_game": "None",
+                    "target_name": "Aliyun-AntiDDoS-1",
+                    "target_host": "203.107.36.87",
+                    "target_type": "mihoyo_edge",
+                    "packets_sent": 5,
+                    "packets_recv": 5,
+                    "loss_pct": 0.0,
+                    "min_rtt_ms": 200.0,
+                    "avg_rtt_ms": 205.0,
+                    "max_rtt_ms": 210.0,
+                    "jitter_ms": 5.0,
+                    "tcp_port": 443,
+                    "tcp_success": True,
+                    "tcp_handshake_ms": 205.0,
+                    "anomaly_triggered": False,
+                })
+                # Legacy UDP game combat server that dropped ICMP pings
+                rows.append({
+                    "timestamp_local": f"2026-09-26 12:00:0{i}",
+                    "timestamp_cst": f"2026-09-27 00:00:0{i}",
+                    "cst_hour": 0,
+                    "is_cst_peak": False,
+                    "active_game": "原神",
+                    "target_name": "LiveGame-原神-UDP",
+                    "target_host": "47.116.110.53",
+                    "target_type": "mihoyo_live_game",
+                    "packets_sent": 5,
+                    "packets_recv": 0,
+                    "loss_pct": 100.0,
+                    "min_rtt_ms": -1.0,
+                    "avg_rtt_ms": -1.0,
+                    "max_rtt_ms": -1.0,
+                    "jitter_ms": -1.0,
+                    "tcp_port": 0,
+                    "tcp_success": False,
+                    "tcp_handshake_ms": -1.0,
+                    "anomaly_triggered": False,
+                })
+
+            csv_path = self._create_sample_csv(tmpdir, rows)
+            analyzer = ConnectivityAnalyzer(log_path=str(csv_path), trace_dir=tmpdir)
+            decision = analyzer.evaluate_decision_matrix()
+            # Must remain DO_NOT_BUY_EXCELLENT_CONNECTION because the 100% loss UDP is ignored
+            self.assertEqual(decision["verdict"], "DO_NOT_BUY_EXCELLENT_CONNECTION")
+
+
+class TestMonitorTargetFiltering(unittest.TestCase):
+    def test_resolve_targets_filters_udp(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg_path = Path(tmpdir) / "config.json"
+            cfg_path.write_text(json.dumps({
+                "targets": {
+                    "local_gateway": "192.168.1.1",
+                    "global_control": "1.1.1.1",
+                    "asia_transit_control": "20.210.150.1",
+                    "mihoyo_endpoints": []
+                },
+                "paths": {"log_file_template": str(Path(tmpdir) / "test.csv")}
+            }), encoding="utf-8")
+
+            monitor = NetworkMonitor(config_path=str(cfg_path))
+            running_games = [{"game_name": "原神 (Genshin Impact CN)", "exe_name": "YuanShen.exe", "pid": 1234}]
+            conns = [
+                {"game_name": "原神", "protocol": "TCP", "remote_ip": "106.15.239.171", "remote_port": 443},
+                {"game_name": "原神", "protocol": "UDP", "remote_ip": "47.116.110.53", "remote_port": 22101},
+            ]
+
+            targets = monitor.resolve_targets(running_games=running_games, game_connections=conns)
+            target_names = [t["name"] for t in targets]
+
+            # TCP socket must be added
+            self.assertIn("LiveGame-原神-TCP", target_names)
+            # UDP socket must be excluded
+            self.assertNotIn("LiveGame-原神-UDP", target_names)
+            self.assertFalse(any("UDP" in name for name in target_names))
+
 
 if __name__ == "__main__":
     unittest.main()

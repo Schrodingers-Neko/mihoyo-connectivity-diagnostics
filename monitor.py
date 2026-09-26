@@ -330,7 +330,7 @@ class NetworkMonitor:
                 "port": ep.get("port", 443),
             })
 
-        # Dynamically discover running game active server socket IPs
+        # Dynamically discover running game active server socket IPs (TCP only)
         if running_games:
             conns = (
                 game_connections
@@ -339,15 +339,19 @@ class NetworkMonitor:
             )
             seen_hosts = {t["host"] for t in targets}
             for c in conns:
+                # Only monitor TCP connections (dispatch, gateway, auth).
+                # UDP combat nodes intentionally drop ICMP pings at the edge firewall, causing false 100% timeouts.
+                if c.get("protocol") != "TCP":
+                    continue
                 ip = c["remote_ip"]
                 if ip not in seen_hosts:
                     seen_hosts.add(ip)
                     short_name = c["game_name"].split()[0]
                     targets.append({
-                        "name": f"LiveGame-{short_name}-{c['protocol']}",
+                        "name": f"LiveGame-{short_name}-TCP",
                         "host": ip,
                         "type": "mihoyo_live_game",
-                        "port": c["remote_port"] if c["protocol"] == "TCP" else 0,
+                        "port": c.get("remote_port", 0),
                     })
 
         return targets
