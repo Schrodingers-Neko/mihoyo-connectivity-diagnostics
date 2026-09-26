@@ -1,5 +1,13 @@
 # 米哈游国服网络连通性诊断与加速器选购评估工具
 
+<p align="left">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT"></a>
+  <a href="https://www.python.org/"><img src="https://img.shields.io/badge/Python-3.11+-3776AB.svg?logo=python&logoColor=white" alt="Python: 3.11+"></a>
+  <img src="https://img.shields.io/badge/Platform-Windows-0078D6.svg?logo=windows&logoColor=white" alt="Platform: Windows">
+  <img src="https://img.shields.io/badge/Dependencies-Zero%20(Stdlib)-success.svg" alt="Dependencies: Zero (Stdlib)">
+  <img src="https://img.shields.io/badge/Target-miHoYo%20国服-FF5722.svg" alt="Target: miHoYo 国服">
+</p>
+
 [简体中文](README.md) | [English](README.en.md)
 
 专为海外连接**米哈游国服** (miHoYo China Server) 玩家（*原神*、*崩坏：星穹铁道*、*绝区零*、*崩坏3*）设计的轻量化、持续性网络诊断套件与加速器选购决策引擎。
@@ -197,3 +205,9 @@ python analyze.py --all --html
   }
 }
 ```
+
+---
+
+## 开源许可
+
+本项目基于 [MIT License](LICENSE) 许可协议开源。

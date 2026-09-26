@@ -1,5 +1,13 @@
 # miHoYo China Server Connectivity Diagnostic Suite
 
+<p align="left">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT"></a>
+  <a href="https://www.python.org/"><img src="https://img.shields.io/badge/Python-3.11+-3776AB.svg?logo=python&logoColor=white" alt="Python: 3.11+"></a>
+  <img src="https://img.shields.io/badge/Platform-Windows-0078D6.svg?logo=windows&logoColor=white" alt="Platform: Windows">
+  <img src="https://img.shields.io/badge/Dependencies-Zero%20(Stdlib)-success.svg" alt="Dependencies: Zero (Stdlib)">
+  <img src="https://img.shields.io/badge/Target-miHoYo%20CN%20Server-FF5722.svg" alt="Target: miHoYo CN Server">
+</p>
+
 [简体中文](README.md) | [English](README.en.md)
 
 A continuous, lightweight network diagnostic tool and decision engine designed for players connecting to **miHoYo / HoYoverse China servers (国服)** (*Genshin Impact*, *Honkai: Star Rail*, *Zenless Zone Zero*, *Honkai Impact 3rd*) from outside mainland China.
@@ -193,3 +201,9 @@ The `traces/` directory stores **event-triggered forensic traceroutes**:
   }
 }
 ```
+
+---
+
+## License
+
+This project is licensed under the [MIT License](LICENSE).
