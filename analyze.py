@@ -1,8 +1,9 @@
 """
 Decision Engine and Log Analyzer for miHoYo Connectivity Diagnostics.
-Parses logs/connectivity.csv and traces/, evaluates performance deltas
+Parses logs/connectivity*.csv and traces/, evaluates performance deltas
 between China Peak Hours (19:00-23:00 CST) and Off-Peak, and generates
 a definitive buying recommendation for game accelerators.
+Generates bilingual HTML reports defaulting to zh-CN with an interactive en-US toggle.
 """
 
 from __future__ import annotations
@@ -82,26 +83,26 @@ class ConnectivityAnalyzer:
                 reader = csv.DictReader(f)
                 for row in reader:
                     self.records.append({
-                    "timestamp_local": row.get("timestamp_local", ""),
-                    "timestamp_cst": row.get("timestamp_cst", ""),
-                    "cst_hour": safe_int(row.get("cst_hour")),
-                    "is_cst_peak": row.get("is_cst_peak", "False").lower() == "true",
-                    "active_game": row.get("active_game", "None"),
-                    "target_name": row.get("target_name", ""),
-                    "target_host": row.get("target_host", ""),
-                    "target_type": row.get("target_type", ""),
-                    "packets_sent": safe_int(row.get("packets_sent")),
-                    "packets_recv": safe_int(row.get("packets_recv")),
-                    "loss_pct": safe_float(row.get("loss_pct")),
-                    "min_rtt_ms": safe_float(row.get("min_rtt_ms"), -1.0),
-                    "avg_rtt_ms": safe_float(row.get("avg_rtt_ms"), -1.0),
-                    "max_rtt_ms": safe_float(row.get("max_rtt_ms"), -1.0),
-                    "jitter_ms": safe_float(row.get("jitter_ms"), -1.0),
-                    "tcp_port": safe_int(row.get("tcp_port")),
-                    "tcp_success": row.get("tcp_success", "False").lower() == "true",
-                    "tcp_handshake_ms": safe_float(row.get("tcp_handshake_ms"), -1.0),
-                    "anomaly_triggered": row.get("anomaly_triggered", "False").lower() == "true",
-                })
+                        "timestamp_local": row.get("timestamp_local", ""),
+                        "timestamp_cst": row.get("timestamp_cst", ""),
+                        "cst_hour": safe_int(row.get("cst_hour")),
+                        "is_cst_peak": row.get("is_cst_peak", "False").lower() == "true",
+                        "active_game": row.get("active_game", "None"),
+                        "target_name": row.get("target_name", ""),
+                        "target_host": row.get("target_host", ""),
+                        "target_type": row.get("target_type", ""),
+                        "packets_sent": safe_int(row.get("packets_sent")),
+                        "packets_recv": safe_int(row.get("packets_recv")),
+                        "loss_pct": safe_float(row.get("loss_pct")),
+                        "min_rtt_ms": safe_float(row.get("min_rtt_ms"), -1.0),
+                        "avg_rtt_ms": safe_float(row.get("avg_rtt_ms"), -1.0),
+                        "max_rtt_ms": safe_float(row.get("max_rtt_ms"), -1.0),
+                        "jitter_ms": safe_float(row.get("jitter_ms"), -1.0),
+                        "tcp_port": safe_int(row.get("tcp_port")),
+                        "tcp_success": row.get("tcp_success", "False").lower() == "true",
+                        "tcp_handshake_ms": safe_float(row.get("tcp_handshake_ms"), -1.0),
+                        "anomaly_triggered": row.get("anomaly_triggered", "False").lower() == "true",
+                    })
 
     def aggregate_by_target(self) -> dict[str, dict[str, Any]]:
         groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -166,12 +167,18 @@ class ConnectivityAnalyzer:
         if total_samples < 5:
             return {
                 "verdict": "INSUFFICIENT_DATA",
-                "badge": "NEED MORE DATA",
-                "summary": "Fewer than 5 diagnostic samples collected so far.",
+                "badge_en": "NEED MORE DATA",
+                "badge_zh": "数据积累不足",
+                "summary_en": "Fewer than 5 diagnostic samples collected so far.",
+                "summary_zh": "当前采集的诊断样本过少（少于 5 组）。",
                 "details": [
-                    "Keep `monitor.py` running for at least 1-2 hours (ideally across China peak hours 19:00-23:00 CST / 07:00-11:00 EDT) to accumulate statistical significance."
+                    {
+                        "en": "Keep monitor.py running for at least 1-2 hours (ideally across China peak hours 19:00-23:00 CST) to accumulate statistical significance.",
+                        "zh": "建议保持 monitor.py 后台运行 1~2 小时（尤其在北京时间 19:00~23:00 晚高峰期间）以积累充足统计样本。",
+                    }
                 ],
-                "action": "Let the monitor continue running.",
+                "action_en": "Let the monitor continue running.",
+                "action_zh": "让监控程序继续运行并积累样本。",
             }
 
         local_stat = stats.get("Local-Gateway", {})
@@ -182,15 +189,17 @@ class ConnectivityAnalyzer:
         local_jitter = local_stat.get("avg_jitter_ms", 0.0)
         global_loss = global_stat.get("loss_pct", 0.0)
 
-        # miHoYo nodes analysis
         mihoyo_stats = [v for k, v in stats.items() if v["target_type"].startswith("mihoyo")]
         if not mihoyo_stats:
             return {
                 "verdict": "NO_MIHOYO_TARGETS",
-                "badge": "CONFIG ERROR",
-                "summary": "No miHoYo target statistics available.",
+                "badge_en": "CONFIG ERROR",
+                "badge_zh": "配置异常",
+                "summary_en": "No miHoYo target statistics available.",
+                "summary_zh": "未能获取到米哈游服务器目标的统计数据。",
                 "details": [],
-                "action": "Check config.json targets.",
+                "action_en": "Check config.json targets.",
+                "action_zh": "请检查 config.json 中的目标配置。",
             }
 
         avg_mihoyo_loss = sum(m["loss_pct"] for m in mihoyo_stats) / len(mihoyo_stats)
@@ -206,31 +215,43 @@ class ConnectivityAnalyzer:
         )
 
         anomalies_logged = sum(1 for r in self.records if r["anomaly_triggered"])
-        saved_traces = list(self.trace_dir.glob("*.txt"))
 
         # Rule 1: Local network issue
         if local_loss >= 5.0 or local_jitter >= 15.0:
             return {
                 "verdict": "DO_NOT_BUY_LOCAL_FAULT",
-                "badge": "DO NOT BUY (LOCAL FAULT)",
-                "summary": f"Local network fault detected: Local Gateway has {local_loss}% loss and {local_jitter}ms jitter.",
+                "badge_en": "DO NOT BUY (LOCAL FAULT)",
+                "badge_zh": "无需购买 (本地局域网故障)",
+                "summary_en": f"Local network fault detected: Local Gateway has {local_loss}% loss and {local_jitter}ms jitter.",
+                "summary_zh": f"检测到本地网络异常：本地网关丢包率达 {local_loss}%，抖动 {local_jitter}ms。",
                 "details": [
-                    f"Your Wi-Fi or home router is dropping packets ({local_loss}% loss) before reaching the internet.",
-                    "An accelerator cannot fix local packet loss. Connect via Ethernet cable or restart your router/modem.",
+                    {
+                        "en": f"Your Wi-Fi or home router is dropping packets ({local_loss}% loss) before traffic reaches the internet.",
+                        "zh": f"数据包在出局前就已经在本地 Wi-Fi 或路由器端丢弃（本地丢包率 {local_loss}%）。",
+                    },
+                    {
+                        "en": "An accelerator cannot fix local packet loss. Connect via Ethernet cable or restart your router/modem.",
+                        "zh": "游戏加速器无法解决本地局域网物理丢包。建议优先更换有线以太网连接或重启光猫/路由器。",
+                    },
                 ],
-                "action": "Fix local Wi-Fi / LAN connection first.",
+                "action_en": "Fix local Wi-Fi / LAN connection first.",
+                "action_zh": "优先排查并修复本地 Wi-Fi / 路由器有线连接。",
             }
 
-        # Rule 2: Cross-border 163 congestion (Peak vs Off-peak delta)
-        # If miHoYo loss is prominent during peak hours while local & global are clean
+        # Rule 2: Cross-border 163 congestion
         peak_delta = avg_mihoyo_peak_loss - avg_mihoyo_offpeak_loss
         differential_loss = avg_mihoyo_loss - max(local_loss, global_loss)
 
         total_peak_samples = sum(m["peak_samples"] for m in mihoyo_stats)
-        peak_str = (
+        peak_str_en = (
             f"Spiking to {avg_mihoyo_peak_loss:.1f}% during CST Peak hours"
             if total_peak_samples > 0
             else "Off-peak samples only; CST peak hours are 19:00-23:00 CST"
+        )
+        peak_str_zh = (
+            f"中国晚高峰期间丢包飙升至 {avg_mihoyo_peak_loss:.1f}%"
+            if total_peak_samples > 0
+            else "当前仅含非高峰样本；中国晚高峰为北京时间 19:00~23:00"
         )
 
         if (
@@ -240,42 +261,81 @@ class ConnectivityAnalyzer:
         ):
             return {
                 "verdict": "BUY_ACCELERATOR",
-                "badge": "RECOMMENDED: BUY ACCELERATOR",
-                "summary": "Cross-border ChinaNet 163 public gateway congestion & throttling verified.",
+                "badge_en": "RECOMMENDED: BUY ACCELERATOR",
+                "badge_zh": "建议购买加速器",
+                "summary_en": "Cross-border ChinaNet 163 public gateway congestion & throttling verified.",
+                "summary_zh": "已证实跨洋公共 ChinaNet 163 骨干网出入口存在严重拥堵与 QoS 审查限速。",
                 "details": [
-                    f"Local and global controls are clean (Local loss: {local_loss}%, Global loss: {global_loss}%).",
-                    f"miHoYo targets experience {avg_mihoyo_loss:.1f}% average packet loss ({peak_str}).",
-                    f"Recorded {anomalies_logged} severe route degradation event(s).",
-                    "A dedicated game accelerator (NetEase UU or Leigod) using private CN2 GIA/SD-WAN lines will bypass this public gateway bottleneck.",
+                    {
+                        "en": f"Local and global controls are clean (Local loss: {local_loss}%, Global loss: {global_loss}%).",
+                        "zh": f"本地与跨国控制组网络均健康纯净（本地丢包率: {local_loss}%，全局控制组丢包率: {global_loss}%）。",
+                    },
+                    {
+                        "en": f"miHoYo targets experience {avg_mihoyo_loss:.1f}% average packet loss ({peak_str_en}).",
+                        "zh": f"米哈游国服节点平均丢包率达 {avg_mihoyo_loss:.1f}%（{peak_str_zh}）。",
+                    },
+                    {
+                        "en": f"Recorded {anomalies_logged} severe route degradation event(s).",
+                        "zh": f"共捕获记录到 {anomalies_logged} 次严重路由劣化事件并已保存快照。",
+                    },
+                    {
+                        "en": "A dedicated game accelerator (NetEase UU or Leigod) using private CN2 GIA/SD-WAN lines will bypass this public gateway bottleneck.",
+                        "zh": "游戏加速器（网易UU或雷神加速器）使用的企业级 CN2 GIA / AS9929 / SD-WAN 专线可完全绕过公共 163 骨干网拥堵瓶颈。",
+                    },
                 ],
-                "action": "Proceed with NetEase UU (网易UU) or Leigod (雷神) subscription.",
+                "action_en": "Proceed with NetEase UU (网易UU) or Leigod (雷神) subscription.",
+                "action_zh": "建议订购网易UU加速器或雷神加速器（可优先领取免费试用时长测试）。",
             }
 
         # Rule 3: Pristine connection
         if avg_mihoyo_loss < 3.0 and avg_mihoyo_rtt > 0 and avg_mihoyo_rtt < 260.0:
             return {
                 "verdict": "DO_NOT_BUY_EXCELLENT_CONNECTION",
-                "badge": "DO NOT BUY (CONNECTION IS HEALTHY)",
-                "summary": f"Your direct connection to miHoYo China is currently healthy (Loss: {avg_mihoyo_loss:.1f}%, Avg RTT: {avg_mihoyo_rtt:.1f}ms).",
+                "badge_en": "DO NOT BUY (CONNECTION IS HEALTHY)",
+                "badge_zh": "无需购买 (当前网络良好)",
+                "summary_en": f"Your direct connection to miHoYo China is currently healthy (Loss: {avg_mihoyo_loss:.1f}%, Avg RTT: {avg_mihoyo_rtt:.1f}ms).",
+                "summary_zh": f"当前直连米哈游国服网络表现优良（丢包率: {avg_mihoyo_loss:.1f}%，平均时延: {avg_mihoyo_rtt:.1f}ms）。",
                 "details": [
-                    f"Packet loss is low ({avg_mihoyo_loss:.1f}%), within playable thresholds.",
-                    "Latency is near the physical speed-of-light floor for cross-border fiber.",
-                    "No subscription needed unless connectivity degrades during specific hours.",
+                    {
+                        "en": f"Packet loss is low ({avg_mihoyo_loss:.1f}%), within playable thresholds.",
+                        "zh": f"丢包率维持在极低水准（{avg_mihoyo_loss:.1f}%），处于正常可游玩范围。",
+                    },
+                    {
+                        "en": "Latency is near the physical speed-of-light floor for cross-border fiber.",
+                        "zh": "时延接近跨国海底光缆物理光速极限。",
+                    },
+                    {
+                        "en": "No subscription needed unless connectivity degrades during specific hours.",
+                        "zh": "当前阶段无需购买加速器；如遇特定时段卡顿可随时重新发起诊断。",
+                    },
                 ],
-                "action": "Hold off on buying; re-check if lag spikes reoccur.",
+                "action_en": "Hold off on buying; re-check if lag spikes reoccur.",
+                "action_zh": "暂无须购买；待出现明显卡顿或重连时再行检测。",
             }
 
-        # Default fallback: Mild degradation or indeterminate
+        # Default fallback: Mild degradation
         return {
             "verdict": "MONITORING_SUGGESTED",
-            "badge": "BORDERLINE / CONTINUE MONITORING",
-            "summary": f"Mild packet loss detected ({avg_mihoyo_loss:.1f}%), but below definitive threshold.",
+            "badge_en": "BORDERLINE / CONTINUE MONITORING",
+            "badge_zh": "中度波动 / 建议继续观察",
+            "summary_en": f"Mild packet loss detected ({avg_mihoyo_loss:.1f}%), but below definitive threshold.",
+            "summary_zh": f"检测到轻度丢包与波动（{avg_mihoyo_loss:.1f}%），未达购买必要阈值。",
             "details": [
-                f"Local network is stable ({local_loss}% loss).",
-                f"miHoYo average latency is {avg_mihoyo_rtt:.1f}ms with {avg_mihoyo_loss:.1f}% loss.",
-                "Run monitor during your usual gaming sessions to see if game combat feels desynced.",
+                {
+                    "en": f"Local network is stable ({local_loss}% loss).",
+                    "zh": f"本地网络保持稳定（{local_loss}% 丢包）。",
+                },
+                {
+                    "en": f"miHoYo average latency is {avg_mihoyo_rtt:.1f}ms with {avg_mihoyo_loss:.1f}% loss.",
+                    "zh": f"米哈游目标节点平均时延为 {avg_mihoyo_rtt:.1f}ms，丢包率为 {avg_mihoyo_loss:.1f}%。",
+                },
+                {
+                    "en": "Run monitor during your usual gaming sessions to see if game combat feels desynced.",
+                    "zh": "建议在实际游戏游玩期间保持后台监控，观察战斗切人是否存在卡顿脱节。",
+                },
             ],
-            "action": "Test a free trial of NetEase UU / Leigod if you experience in-game rubberbanding.",
+            "action_en": "Test a free trial of NetEase UU / Leigod if you experience in-game rubberbanding.",
+            "action_zh": "如游戏中感知到明显脱节卡顿，可先尝试网易UU或雷神的免费试用时长。",
         }
 
     def print_terminal_report(self) -> None:
@@ -284,6 +344,7 @@ class ConnectivityAnalyzer:
 
         print("\n" + "=" * 78)
         print("  miHoYo Connectivity Diagnostic & Accelerator Decision Report")
+        print("  米哈游国服网络连通性诊断与加速器选购评估报告")
         print("=" * 78)
         print(f"Total Probed Samples: {len(self.records)}")
         if self.records:
@@ -292,11 +353,11 @@ class ConnectivityAnalyzer:
             print(f"Monitoring Period:    {first_ts}  -->  {last_ts}")
 
         print("\n" + "-" * 78)
-        print("  1. TARGET PERFORMANCE SUMMARY")
+        print("  1. TARGET PERFORMANCE SUMMARY / 目标节点性能摘要")
         print("-" * 78)
 
         headers = ["Target", "Host", "Loss%", "Avg RTT", "Jitter", "TCP%", "CST Peak Loss", "Off-Peak Loss"]
-        col_w = [20, 16, 8, 10, 8, 8, 14, 14]
+        col_w = [22, 16, 8, 10, 8, 8, 14, 14]
         h_line = " | ".join(h.ljust(col_w[i]) for i, h in enumerate(headers))
         s_line = "-+-".join("-" * col_w[i] for i in range(len(headers)))
         print(h_line)
@@ -322,14 +383,22 @@ class ConnectivityAnalyzer:
             print(" | ".join(cell.ljust(col_w[i]) for i, cell in enumerate(row)))
 
         print("\n" + "-" * 78)
-        print("  2. ACCELERATOR BUYING VERDICT")
+        print("  2. ACCELERATOR BUYING VERDICT / 选购评估结论")
         print("-" * 78)
-        print(f"\n >>> VERDICT: [ {decision['badge']} ] <<<\n")
-        print(f"Summary: {decision['summary']}\n")
+        badge_en = decision.get("badge_en", decision.get("badge", ""))
+        badge_zh = decision.get("badge_zh", "")
+        print(f"\n >>> VERDICT: [ {badge_zh} | {badge_en} ] <<<\n")
+        print(f"Summary (ZH): {decision.get('summary_zh', '')}")
+        print(f"Summary (EN): {decision.get('summary_en', '')}\n")
         print("Diagnostic Details:")
-        for d in decision["details"]:
-            print(f"  * {d}")
-        print(f"\nRecommended Action: {decision['action']}\n")
+        for d in decision.get("details", []):
+            if isinstance(d, dict):
+                print(f"  * [ZH] {d.get('zh', '')}")
+                print(f"    [EN] {d.get('en', '')}")
+            else:
+                print(f"  * {d}")
+        print(f"\nRecommended Action (ZH): {decision.get('action_zh', '')}")
+        print(f"Recommended Action (EN): {decision.get('action_en', '')}\n")
         print("=" * 78)
 
     def generate_html_report(self, output_path: str | None = None) -> tuple[Path, Path]:
@@ -343,8 +412,15 @@ class ConnectivityAnalyzer:
         stats = self.aggregate_by_target()
         decision = self.evaluate_decision_matrix()
 
-        badge_color = "#10b981" if "HEALTHY" in decision["badge"] else (
-            "#ef4444" if "BUY ACCELERATOR" in decision["badge"] else "#f59e0b"
+        badge_en = decision.get("badge_en", "")
+        badge_zh = decision.get("badge_zh", "")
+        summary_en = decision.get("summary_en", "")
+        summary_zh = decision.get("summary_zh", "")
+        action_en = decision.get("action_en", "")
+        action_zh = decision.get("action_zh", "")
+
+        badge_color = "#10b981" if "HEALTHY" in badge_en else (
+            "#ef4444" if "BUY ACCELERATOR" in badge_en else "#f59e0b"
         )
 
         rows_html = ""
@@ -359,65 +435,125 @@ class ConnectivityAnalyzer:
                 <td>{rtt}</td>
                 <td>{jitter}</td>
                 <td>{s['tcp_rate']:.0f}%</td>
-                <td>{s['peak_loss']:.1f}% <small style="color:#64748b;">({s['peak_samples']} samples)</small></td>
-                <td>{s['offpeak_loss']:.1f}% <small style="color:#64748b;">({s['offpeak_samples']} samples)</small></td>
+                <td>{s['peak_loss']:.1f}% <small style="color:#64748b;">({s['peak_samples']})</small></td>
+                <td>{s['offpeak_loss']:.1f}% <small style="color:#64748b;">({s['offpeak_samples']})</small></td>
             </tr>
             """
 
-        details_html = "".join(f"<li>{d}</li>" for d in decision["details"])
+        details_html = ""
+        for d in decision.get("details", []):
+            if isinstance(d, dict):
+                details_html += f"""
+                <li>
+                    <span class="zh">{d.get('zh', '')}</span>
+                    <span class="en">{d.get('en', '')}</span>
+                </li>
+                """
+            else:
+                details_html += f"<li>{d}</li>"
+
         source_files_str = ", ".join(f.name for f in self.source_files) if self.source_files else "None"
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         html_content = f"""<!DOCTYPE html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<title>miHoYo Connectivity Diagnostic Report</title>
+<title>米哈游国服网络连通性诊断报告 | miHoYo CN Diagnostics</title>
 <style>
-  body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f172a; color: #f8fafc; margin: 0; padding: 30px; }}
+  body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif; background: #0f172a; color: #f8fafc; margin: 0; padding: 30px; }}
+  body.lang-zh .en {{ display: none !important; }}
+  body.lang-en .zh {{ display: none !important; }}
   .container {{ max-width: 1000px; margin: 0 auto; }}
+  .header {{ display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }}
+  h1 {{ margin: 0; font-size: 24px; color: #38bdf8; }}
+  .lang-switch {{ display: flex; gap: 4px; background: #1e293b; padding: 4px; border-radius: 8px; border: 1px solid #334155; }}
+  .lang-btn {{ background: transparent; border: none; color: #94a3b8; padding: 5px 14px; border-radius: 6px; cursor: pointer; font-size: 13px; font-weight: 600; transition: all 0.2s; }}
+  .lang-btn.active {{ background: #38bdf8; color: #0f172a; }}
+  .meta {{ color: #94a3b8; font-size: 14px; margin-bottom: 24px; }}
   .card {{ background: #1e293b; border-radius: 12px; padding: 24px; margin-bottom: 24px; border: 1px solid #334155; }}
-  h1 {{ margin-top: 0; font-size: 24px; color: #38bdf8; }}
   .badge {{ display: inline-block; padding: 6px 14px; border-radius: 9999px; font-weight: 700; font-size: 14px; background: {badge_color}; color: #ffffff; }}
   table {{ width: 100%; border-collapse: collapse; margin-top: 16px; }}
   th, td {{ text-align: left; padding: 12px 14px; border-bottom: 1px solid #334155; }}
   th {{ background: #0f172a; color: #94a3b8; font-size: 13px; text-transform: uppercase; letter-spacing: 0.05em; }}
-  ul {{ padding-left: 20px; line-height: 1.6; color: #cbd5e1; }}
-  .action-box {{ background: #0f172a; border-left: 4px solid #38bdf8; padding: 14px 18px; border-radius: 6px; margin-top: 16px; }}
-  .meta {{ color: #94a3b8; font-size: 14px; margin-bottom: 20px; }}
+  ul {{ padding-left: 20px; line-height: 1.7; color: #cbd5e1; }}
+  li {{ margin-bottom: 6px; }}
+  .action-box {{ background: #0f172a; border-left: 4px solid #38bdf8; padding: 14px 18px; border-radius: 6px; margin-top: 16px; font-size: 15px; }}
 </style>
+<script>
+  function setLang(lang) {{
+    document.body.className = 'lang-' + lang;
+    document.documentElement.lang = (lang === 'zh') ? 'zh-CN' : 'en-US';
+    document.querySelectorAll('.lang-btn').forEach(function(b) {{ b.classList.remove('active'); }});
+    var activeBtn = document.getElementById('btn-' + lang);
+    if (activeBtn) activeBtn.classList.add('active');
+    try {{ localStorage.setItem('mihoyo_diag_lang', lang); }} catch (e) {{}}
+  }}
+  window.addEventListener('DOMContentLoaded', function() {{
+    var saved = 'zh';
+    try {{ saved = localStorage.getItem('mihoyo_diag_lang') || 'zh'; }} catch (e) {{}}
+    setLang(saved);
+  }});
+</script>
 </head>
-<body>
+<body class="lang-zh">
 <div class="container">
-  <h1>miHoYo China Connectivity Diagnostic Report</h1>
+  <div class="header">
+    <h1>
+      <span class="zh">米哈游国服网络连通性诊断报告</span>
+      <span class="en">miHoYo China Connectivity Diagnostic Report</span>
+    </h1>
+    <div class="lang-switch">
+      <button id="btn-zh" class="lang-btn active" onclick="setLang('zh')">简体中文</button>
+      <button id="btn-en" class="lang-btn" onclick="setLang('en')">English</button>
+    </div>
+  </div>
+
   <div class="meta">
-    Generated on: <strong>{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} Local Time</strong> | 
-    Source: <strong>{source_files_str}</strong> | Total Samples: <strong>{len(self.records)}</strong>
+    <span class="zh">生成时间: <strong>{now_str} (本地时间)</strong> | 数据源: <strong>{source_files_str}</strong> | 样本数: <strong>{len(self.records)}</strong></span>
+    <span class="en">Generated on: <strong>{now_str} (Local Time)</strong> | Source: <strong>{source_files_str}</strong> | Total Samples: <strong>{len(self.records)}</strong></span>
   </div>
 
   <div class="card">
     <div style="display:flex; justify-content:space-between; align-items:center;">
-      <h2 style="margin:0; font-size:18px;">Buying Recommendation</h2>
-      <span class="badge">{decision['badge']}</span>
+      <h2 style="margin:0; font-size:18px;">
+        <span class="zh">加速器选购评估结论</span>
+        <span class="en">Buying Recommendation</span>
+      </h2>
+      <span class="badge">
+        <span class="zh">{badge_zh}</span>
+        <span class="en">{badge_en}</span>
+      </span>
     </div>
-    <p style="font-size:16px; margin: 16px 0 8px 0;"><strong>{decision['summary']}</strong></p>
+    <p style="font-size:16px; margin: 16px 0 8px 0;">
+      <strong>
+        <span class="zh">{summary_zh}</span>
+        <span class="en">{summary_en}</span>
+      </strong>
+    </p>
     <ul>{details_html}</ul>
     <div class="action-box">
-      <strong>Recommended Action:</strong> {decision['action']}
+      <strong><span class="zh">建议操作: </span><span class="en">Recommended Action: </span></strong>
+      <span class="zh">{action_zh}</span>
+      <span class="en">{action_en}</span>
     </div>
   </div>
 
   <div class="card">
-    <h2 style="margin-top:0; font-size:18px;">Target Performance Metrics</h2>
+    <h2 style="margin-top:0; font-size:18px;">
+      <span class="zh">目标节点性能指标</span>
+      <span class="en">Target Performance Metrics</span>
+    </h2>
     <table>
       <thead>
         <tr>
-          <th>Target</th>
-          <th>Loss %</th>
-          <th>Avg RTT</th>
-          <th>Jitter</th>
-          <th>TCP 443 OK</th>
-          <th>CST Peak Loss (19:00-23:00)</th>
-          <th>Off-Peak Loss</th>
+          <th><span class="zh">监测目标</span><span class="en">Target</span></th>
+          <th><span class="zh">丢包率</span><span class="en">Loss %</span></th>
+          <th><span class="zh">平均时延</span><span class="en">Avg RTT</span></th>
+          <th><span class="zh">抖动</span><span class="en">Jitter</span></th>
+          <th><span class="zh">TCP 握手</span><span class="en">TCP 443</span></th>
+          <th><span class="zh">晚高峰丢包 (19:00-23:00)</span><span class="en">CST Peak Loss (19:00-23:00)</span></th>
+          <th><span class="zh">非高峰丢包</span><span class="en">Off-Peak Loss</span></th>
         </tr>
       </thead>
       <tbody>
