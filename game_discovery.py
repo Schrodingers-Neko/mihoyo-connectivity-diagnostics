@@ -1,7 +1,8 @@
 """
-Dynamic Game Discovery and Process/Socket Inspector for miHoYo Games.
-Scans the miHoYo Launcher directory, discovers installed games, identifies
-running processes, and inspects live game server network sockets.
+miHoYo China Server (国服) Game Process and Socket Discovery.
+Inspects running Windows processes against a user-configurable registry of
+China-server-exclusive miHoYo game executables (YuanShen.exe, StarRail.exe,
+ZenlessZoneZero.exe, BH3.exe), completely independent of installation drive or folder paths.
 """
 
 from __future__ import annotations
@@ -12,126 +13,94 @@ import json
 import os
 import re
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
-DEFAULT_LAUNCHER_GAMES_DIR = r"D:\Program Files\miHoYo Launcher\games"
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 
-# Patterns of auxiliary / non-game executables to ignore
-IGNORED_EXE_PATTERNS = [
-    r"crash",
-    r"plugin",
-    r"refresher",
-    r"update",
-    r"uninstall",
-    r"helper",
-    r"reporter",
-    r"cefview",
-    r"zfgamebrowser",
+# Default registry of miHoYo China Server (国服) game executables.
+# Global server client executables (e.g. GenshinImpact.exe, Honkai Impact 3rd.exe) are excluded.
+DEFAULT_TRACKED_GAMES: list[dict[str, Any]] = [
+    {
+        "name": "原神 (Genshin Impact CN)",
+        "executables": ["YuanShen.exe"],
+        "server_ports": [22101, 22102],
+    },
+    {
+        "name": "崩坏：星穹铁道 (Honkai: Star Rail CN)",
+        "executables": ["StarRail.exe"],
+        "server_ports": [],
+    },
+    {
+        "name": "绝区零 (Zenless Zone Zero CN)",
+        "executables": ["ZenlessZoneZero.exe"],
+        "server_ports": [],
+    },
+    {
+        "name": "崩坏3 (Honkai Impact 3rd CN)",
+        "executables": ["BH3.exe"],
+        "server_ports": [],
+    },
 ]
 
 
-def load_launcher_dir(config_path: Path | str = "config.json") -> Path:
-    """Read launcher_games_dir from config.json if available."""
+def load_tracked_games(config_path: Path | str = "config.json") -> list[dict[str, Any]]:
+    """Read tracked_games from config.json or return default CN registry."""
     config_file = Path(config_path)
     if config_file.is_file():
         try:
             with open(config_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                custom_dir = data.get("launcher_games_dir")
-                if custom_dir and os.path.isdir(custom_dir):
-                    return Path(custom_dir)
+                custom_games = data.get("tracked_games")
+                if custom_games and isinstance(custom_games, list):
+                    return custom_games
         except Exception:
             pass
-    return Path(DEFAULT_LAUNCHER_GAMES_DIR)
+    return DEFAULT_TRACKED_GAMES
 
 
-def is_auxiliary_exe(exe_name: str, rel_path: str) -> bool:
-    """Check if an executable is an auxiliary crash/updater/plugin executable."""
-    lower_name = exe_name.lower()
-    lower_path = rel_path.lower()
-    for pattern in IGNORED_EXE_PATTERNS:
-        if re.search(pattern, lower_name) or re.search(pattern, lower_path):
-            return True
-    return False
-
-
-def discover_installed_games(launcher_dir: Path | str | None = None) -> list[dict[str, Any]]:
+def get_target_executable_map(
+    tracked_games: list[dict[str, Any]] | None = None,
+) -> dict[str, dict[str, Any]]:
     """
-    Scan launcher directory for game subdirectories and discover main game executables.
-    Returns a list of discovered games:
-    [
-        {
-            "game_name": "Genshin Impact Game",
-            "folder": "D:\\...\\Genshin Impact Game",
-            "exe_name": "YuanShen.exe",
-            "exe_path": "D:\\...\\YuanShen.exe"
-        },
-        ...
-    ]
+    Build a case-insensitive lookup map: { "yuanshen.exe": game_dict, ... }
     """
-    if launcher_dir is None:
-        launcher_dir = load_launcher_dir()
-    else:
-        launcher_dir = Path(launcher_dir)
+    if tracked_games is None:
+        tracked_games = load_tracked_games()
 
-    discovered = []
-    if not launcher_dir.is_dir():
-        return discovered
-
-    for game_folder in launcher_dir.iterdir():
-        if not game_folder.is_dir():
-            continue
-
-        # Look for executables in the root of the game folder first
-        candidates = []
-        for file in game_folder.iterdir():
-            if file.is_file() and file.suffix.lower() == ".exe":
-                rel = file.name
-                if not is_auxiliary_exe(file.name, rel):
-                    candidates.append(file)
-
-        # If none found directly in root, check 1 level down
-        if not candidates:
-            for sub_file in game_folder.glob("*/*.exe"):
-                rel = str(sub_file.relative_to(game_folder))
-                if not is_auxiliary_exe(sub_file.name, rel):
-                    candidates.append(sub_file)
-
-        # Prefer larger executables or game-like names if multiple candidates exist
-        if candidates:
-            candidates.sort(key=lambda p: p.stat().st_size, reverse=True)
-            primary_exe = candidates[0]
-            discovered.append({
-                "game_name": game_folder.name,
-                "folder": str(game_folder),
-                "exe_name": primary_exe.name,
-                "exe_path": str(primary_exe),
-            })
-
-    return discovered
+    mapping = {}
+    for g in tracked_games:
+        for exe in g.get("executables", []):
+            mapping[exe.lower()] = g
+    return mapping
 
 
-def get_running_games(discovered_games: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+def get_running_games(
+    config_path: Path | str = "config.json",
+    tracked_games: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
     """
-    Query active Windows processes to check if any discovered miHoYo games are running.
+    Scan active Windows processes for configured miHoYo China game executables.
+    Drive-independent: matches against process names regardless of install path.
     Returns:
     [
         {
-            "game_name": "Genshin Impact Game",
+            "game_name": "原神 (Genshin Impact CN)",
             "exe_name": "YuanShen.exe",
             "pid": 11620
         },
         ...
     ]
     """
-    if discovered_games is None:
-        discovered_games = discover_installed_games()
-
-    if not discovered_games:
+    exe_map = get_target_executable_map(tracked_games or load_tracked_games(config_path))
+    if not exe_map:
         return []
-
-    target_exes = {g["exe_name"].lower(): g for g in discovered_games}
 
     try:
         output = subprocess.check_output(
@@ -150,13 +119,13 @@ def get_running_games(discovered_games: list[dict[str, Any]] | None = None) -> l
             image_name = row[0].strip()
             pid_str = row[1].strip()
             lower_name = image_name.lower()
-            if lower_name in target_exes:
+            if lower_name in exe_map:
                 try:
                     pid = int(pid_str)
-                    game_info = target_exes[lower_name]
+                    game_info = exe_map[lower_name]
                     running.append({
-                        "game_name": game_info["game_name"],
-                        "exe_name": game_info["exe_name"],
+                        "game_name": game_info["name"],
+                        "exe_name": image_name,
                         "pid": pid,
                     })
                 except ValueError:
@@ -168,7 +137,7 @@ def get_running_games(discovered_games: list[dict[str, Any]] | None = None) -> l
 def get_game_connections(running_games: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """
     Query netstat to find active TCP and UDP sockets for running game PIDs.
-    Returns active remote IPs and ports.
+    Returns active remote IPs and ports with descriptive China-server labels.
     """
     if not running_games:
         return []
@@ -208,15 +177,19 @@ def get_game_connections(running_games: list[dict[str, Any]]) -> list[dict[str, 
                 if ":" in foreign:
                     r_ip, r_port = foreign.rsplit(":", 1)
                     if r_ip not in ("127.0.0.1", "0.0.0.0", "*", "[::]"):
+                        port_int = int(r_port) if r_port.isdigit() else 0
+                        game = pids_to_game[pid]
+                        desc = _classify_connection(game["exe_name"], proto, port_int)
                         connections.append({
-                            "game_name": pids_to_game[pid]["game_name"],
-                            "exe_name": pids_to_game[pid]["exe_name"],
+                            "game_name": game["game_name"],
+                            "exe_name": game["exe_name"],
                             "pid": pid,
                             "protocol": "TCP",
                             "local": local,
                             "remote_ip": r_ip,
-                            "remote_port": int(r_port) if r_port.isdigit() else 0,
+                            "remote_port": port_int,
                             "state": state,
+                            "description": desc,
                         })
 
         elif proto == "UDP" and len(parts) >= 4:
@@ -231,33 +204,94 @@ def get_game_connections(running_games: list[dict[str, Any]]) -> list[dict[str, 
                 if ":" in foreign:
                     r_ip, r_port = foreign.rsplit(":", 1)
                     if r_ip not in ("127.0.0.1", "0.0.0.0", "*", "[::]"):
+                        port_int = int(r_port) if r_port.isdigit() else 0
+                        game = pids_to_game[pid]
+                        desc = _classify_connection(game["exe_name"], proto, port_int)
                         connections.append({
-                            "game_name": pids_to_game[pid]["game_name"],
-                            "exe_name": pids_to_game[pid]["exe_name"],
+                            "game_name": game["game_name"],
+                            "exe_name": game["exe_name"],
                             "pid": pid,
                             "protocol": "UDP",
                             "local": local,
                             "remote_ip": r_ip,
-                            "remote_port": int(r_port) if r_port.isdigit() else 0,
+                            "remote_port": port_int,
                             "state": "ACTIVE",
+                            "description": desc,
                         })
 
     return connections
 
 
-if __name__ == "__main__":
-    print("=== miHoYo Game Discovery Test ===")
-    games = discover_installed_games()
-    print(f"Discovered {len(games)} installed games:")
-    for g in games:
-        print(f" - [{g['game_name']}] Exe: {g['exe_name']} at {g['exe_path']}")
+def _classify_connection(exe_name: str, proto: str, remote_port: int) -> str:
+    """Classify the role of the connection based on executable and port."""
+    lower_exe = exe_name.lower()
 
-    running = get_running_games(games)
-    print(f"\nRunning game processes ({len(running)}):")
+    if "yuanshen" in lower_exe:
+        if proto == "UDP" and remote_port in (22101, 22102):
+            return "原神 KCP 战斗服务器 (Genshin KCP Combat Server)"
+        elif remote_port in (8999, 443, 80):
+            return "原神 调度/网关节点 (Genshin Dispatch/Gateway)"
+        return "原神 通信节点 (Genshin Node)"
+
+    if "starrail" in lower_exe:
+        if remote_port in (443, 80):
+            return "星穹铁道 网关/调度服务 (HSR Gateway/Dispatch)"
+        return "星穹铁道 游戏通信节点 (HSR Game Server Node)"
+
+    if "zenless" in lower_exe:
+        if remote_port in (443, 80):
+            return "绝区零 网关/调度服务 (ZZZ Gateway/Dispatch)"
+        return "绝区零 游戏通信节点 (ZZZ Game Server Node)"
+
+    if "bh3" in lower_exe:
+        return "崩坏3 游戏/服务节点 (HI3 Node)"
+
+    return "miHoYo 游戏服务节点 (miHoYo Game Node)"
+
+
+# Auxiliary optional disk scanner helper (if user wants to locate physical folders)
+def discover_installed_games(scan_dir: Path | str | None = None) -> list[dict[str, Any]]:
+    """Optional helper: scans directory for game folders matching tracked games."""
+    if scan_dir is None:
+        return []
+    target_path = Path(scan_dir)
+    if not target_path.is_dir():
+        return []
+
+    tracked = load_tracked_games()
+    all_exes = set()
+    for g in tracked:
+        for e in g.get("executables", []):
+            all_exes.add(e.lower())
+
+    discovered = []
+    for item in target_path.iterdir():
+        if item.is_dir():
+            for f in item.glob("*.exe"):
+                if f.name.lower() in all_exes:
+                    discovered.append({
+                        "game_name": item.name,
+                        "folder": str(item),
+                        "exe_name": f.name,
+                        "exe_path": str(f),
+                    })
+    return discovered
+
+
+if __name__ == "__main__":
+    print("=== miHoYo China Server (国服) Game Process Discovery ===")
+    tracked = load_tracked_games()
+    print(f"Tracked CN Game Profiles ({len(tracked)}):")
+    for t in tracked:
+        exes = ", ".join(t.get("executables", []))
+        print(f"  * [{t['name']}] Exe: {exes}")
+
+    running = get_running_games()
+    print(f"\nRunning miHoYo Game Processes ({len(running)}):")
     for r in running:
-        print(f" - [{r['game_name']}] PID: {r['pid']} ({r['exe_name']})")
+        print(f"  * [{r['game_name']}] PID: {r['pid']} ({r['exe_name']})")
 
     conns = get_game_connections(running)
     print(f"\nActive Game Connections ({len(conns)}):")
     for c in conns:
-        print(f" - {c['protocol']} {c['remote_ip']}:{c['remote_port']} [{c['state']}] ({c['game_name']})")
+        print(f"  * {c['protocol']} {c['remote_ip']}:{c['remote_port']} [{c['state']}] - {c['description']}")

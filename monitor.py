@@ -23,9 +23,9 @@ from pathlib import Path
 from typing import Any
 
 from game_discovery import (
-    discover_installed_games,
     get_game_connections,
     get_running_games,
+    load_tracked_games,
 )
 
 if sys.platform == "win32":
@@ -200,7 +200,7 @@ class NetworkMonitor:
         self.trace_dir = Path(self.config.get("paths", {}).get("trace_dir", "traces"))
         self.last_trace_time: dict[str, float] = {}
         self.global_last_trace_time: float = 0.0
-        self.installed_games = discover_installed_games(self.config.get("launcher_games_dir"))
+        self.tracked_games = load_tracked_games(self.config_path)
 
         if log_path:
             self.log_file = Path(log_path)
@@ -273,8 +273,8 @@ class NetworkMonitor:
             })
 
         # Dynamically discover running game active server socket IPs
-        if include_live_game_ips and self.installed_games:
-            running = get_running_games(self.installed_games)
+        if include_live_game_ips:
+            running = get_running_games(config_path=self.config_path, tracked_games=self.tracked_games)
             if running:
                 conns = get_game_connections(running)
                 seen_hosts = {t["host"] for t in targets}
@@ -282,8 +282,9 @@ class NetworkMonitor:
                     ip = c["remote_ip"]
                     if ip not in seen_hosts:
                         seen_hosts.add(ip)
+                        short_name = c["game_name"].split()[0]
                         targets.append({
-                            "name": f"LiveGame-{c['game_name'].split()[0]}-{c['protocol']}",
+                            "name": f"LiveGame-{short_name}-{c['protocol']}",
                             "host": ip,
                             "type": "mihoyo_live_game",
                             "port": c["remote_port"] if c["protocol"] == "TCP" else 0,
@@ -293,9 +294,7 @@ class NetworkMonitor:
 
     def get_current_active_game_label(self) -> str:
         """Return the name of currently running game or 'None'."""
-        if not self.installed_games:
-            return "None"
-        running = get_running_games(self.installed_games)
+        running = get_running_games(config_path=self.config_path, tracked_games=self.tracked_games)
         if not running:
             return "None"
         names = [r["game_name"].split()[0] for r in running]

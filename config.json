@@ -1,5 +1,26 @@
 {
-  "launcher_games_dir": "D:\\Program Files\\miHoYo Launcher\\games",
+  "tracked_games": [
+    {
+      "name": "原神 (Genshin Impact CN)",
+      "executables": ["YuanShen.exe"],
+      "server_ports": [22101, 22102]
+    },
+    {
+      "name": "崩坏：星穹铁道 (Honkai: Star Rail CN)",
+      "executables": ["StarRail.exe"],
+      "server_ports": []
+    },
+    {
+      "name": "绝区零 (Zenless Zone Zero CN)",
+      "executables": ["ZenlessZoneZero.exe"],
+      "server_ports": []
+    },
+    {
+      "name": "崩坏3 (Honkai Impact 3rd CN)",
+      "executables": ["BH3.exe"],
+      "server_ports": []
+    }
+  ],
   "sampling": {
     "interval_seconds": 20,
     "ping_burst_count": 5,

@@ -1,6 +1,7 @@
 """
-CLI tool to inspect active miHoYo game connections in real-time
+CLI tool to inspect active miHoYo China server (国服) game connections in real-time
 and optionally add active game server endpoints into config.json.
+Drive-independent: monitors YuanShen.exe, StarRail.exe, ZenlessZoneZero.exe, and BH3.exe.
 """
 
 from __future__ import annotations
@@ -13,12 +14,10 @@ from pathlib import Path
 from typing import Any
 
 from game_discovery import (
-    discover_installed_games,
     get_game_connections,
     get_running_games,
-    load_launcher_dir,
+    load_tracked_games,
 )
-
 
 if sys.platform == "win32":
     try:
@@ -73,19 +72,20 @@ def add_endpoint_to_config(
     return True
 
 
-def display_status(discovered: list[dict[str, Any]], config_path: str = "config.json") -> list[dict[str, Any]]:
-    running = get_running_games(discovered)
+def display_status(tracked_games: list[dict[str, Any]], config_path: str = "config.json") -> list[dict[str, Any]]:
+    running = get_running_games(config_path=config_path, tracked_games=tracked_games)
     connections = get_game_connections(running)
 
-    print("\n" + "=" * 65)
-    print(" miHoYo Active Game Connection Inspector")
-    print("=" * 65)
+    print("\n" + "=" * 70)
+    print(" miHoYo China Server (国服) Active Connection Inspector")
+    print("=" * 70)
 
     if not running:
-        print("\nNo running miHoYo game processes detected.")
-        print("Discovered games:")
-        for g in discovered:
-            print(f"  * {g['game_name']} ({g['exe_name']})")
+        print("\nNo running miHoYo China server game processes detected.")
+        print("Tracked Game Profiles:")
+        for g in tracked_games:
+            exes = ", ".join(g.get("executables", []))
+            print(f"  * {g['name']} ({exes})")
         print("\nLaunch a game and run this command again to inspect live servers.")
         return []
 
@@ -101,11 +101,7 @@ def display_status(discovered: list[dict[str, Any]], config_path: str = "config.
     rows = []
     for c in connections:
         r_addr = f"{c['remote_ip']}:{c['remote_port']}"
-        desc = "Unknown"
-        if c["protocol"] == "UDP" and c["remote_port"] in (22101, 22102):
-            desc = "Genshin KCP Game Server"
-        elif c["protocol"] == "TCP" and c["remote_port"] in (8999, 443, 80):
-            desc = "Dispatch / Gateway Server"
+        desc = c.get("description", "Unknown")
         rows.append([c["game_name"], c["protocol"], r_addr, c["state"], desc])
 
     print("\nActive Network Connections:")
@@ -115,7 +111,7 @@ def display_status(discovered: list[dict[str, Any]], config_path: str = "config.
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Inspect live miHoYo game connections and optionally add server IPs to monitor."
+        description="Inspect live miHoYo China server game connections and optionally add server IPs to monitor."
     )
     parser.add_argument(
         "--watch",
@@ -142,22 +138,18 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    discovered = discover_installed_games()
-    if not discovered:
-        launcher_dir = load_launcher_dir(args.config)
-        print(f"No games found in '{launcher_dir}'. Check launcher_games_dir in {args.config}.")
-        sys.exit(1)
+    tracked_games = load_tracked_games(args.config)
 
     if args.watch:
         try:
             while True:
-                display_status(discovered, args.config)
+                display_status(tracked_games, args.config)
                 time.sleep(3)
         except KeyboardInterrupt:
             print("\nStopped.")
             return
 
-    connections = display_status(discovered, args.config)
+    connections = display_status(tracked_games, args.config)
 
     if args.json:
         print(json.dumps(connections, indent=2))
@@ -167,7 +159,8 @@ def main() -> None:
         added_count = 0
         for c in connections:
             if c["remote_ip"] not in ("127.0.0.1", "0.0.0.0"):
-                name = f"{c['game_name'].split()[0]}-{c['protocol']}-{c['remote_port']}"
+                clean_name = c["game_name"].split()[0]
+                name = f"{clean_name}-{c['protocol']}-{c['remote_port']}"
                 port = c["remote_port"] if c["protocol"] == "TCP" else 443
                 if add_endpoint_to_config(name, c["remote_ip"], port, args.config):
                     added_count += 1
