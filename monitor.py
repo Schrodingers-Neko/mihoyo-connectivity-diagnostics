@@ -11,6 +11,7 @@ import argparse
 import asyncio
 import csv
 import json
+import locale
 import os
 import re
 import socket
@@ -21,6 +22,7 @@ import time
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any
+import unicodedata
 
 from game_discovery import (
     get_game_connections,
@@ -36,6 +38,41 @@ if sys.platform == "win32":
         pass
 
 CST_TZ = timezone(timedelta(hours=8))
+
+
+def decode_bytes(data: bytes) -> str:
+    """Robustly decode subprocess CLI byte output on Windows (handles UTF-8 and CP936/GBK)."""
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        pass
+
+    preferred = locale.getpreferredencoding(False)
+    for enc in (preferred, "cp936", "gbk", "cp1252", "latin-1"):
+        if not enc:
+            continue
+        try:
+            return data.decode(enc)
+        except (UnicodeDecodeError, LookupError):
+            continue
+
+    return data.decode("utf-8", errors="ignore")
+
+
+def cjk_display_width(val: Any) -> int:
+    """Calculate monospaced terminal display width accounting for East Asian full-width characters."""
+    width = 0
+    for ch in str(val):
+        w = unicodedata.east_asian_width(ch)
+        width += 2 if w in ("W", "F") else 1
+    return width
+
+
+def cjk_ljust(val: Any, width: int) -> str:
+    """Pad string to target terminal display width considering CJK characters."""
+    s = str(val)
+    cw = cjk_display_width(s)
+    return s + (" " * max(0, width - cw))
 
 CSV_HEADERS = [
     "timestamp_local",
@@ -90,7 +127,7 @@ async def ping_target(host: str, burst_count: int, timeout_ms: int) -> dict[str,
             stderr=asyncio.subprocess.PIPE,
         )
         stdout, _ = await proc.communicate()
-        out = stdout.decode("utf-8", errors="ignore")
+        out = decode_bytes(stdout)
     except Exception:
         return {
             "sent": burst_count,
@@ -102,9 +139,9 @@ async def ping_target(host: str, burst_count: int, timeout_ms: int) -> dict[str,
             "jitter": -1.0,
         }
 
-    # Extract individual packet latencies (works across English and localized Windows)
+    # Extract individual packet latencies (works across English, Simplified Chinese, and Traditional Chinese Windows)
     rtts = []
-    for match in re.finditer(r"time[=<](\d+)ms", out, re.IGNORECASE):
+    for match in re.finditer(r"(?:time|时间|時間)[=<](\d+)ms", out, re.IGNORECASE):
         try:
             rtts.append(float(match.group(1)))
         except ValueError:
@@ -114,7 +151,11 @@ async def ping_target(host: str, burst_count: int, timeout_ms: int) -> dict[str,
     recv = len(rtts)
     loss_pct = 100.0
 
-    m_stat = re.search(r"Sent\s*=\s*(\d+),\s*Received\s*=\s*(\d+)", out, re.IGNORECASE)
+    m_stat = re.search(
+        r"(?:Sent|已发送|已傳送)\s*=\s*(\d+).*?(?:Received|已接收|已收到)\s*=\s*(\d+)",
+        out,
+        re.IGNORECASE,
+    )
     if m_stat:
         sent = int(m_stat.group(1))
         recv = int(m_stat.group(2))
@@ -134,7 +175,7 @@ async def ping_target(host: str, burst_count: int, timeout_ms: int) -> dict[str,
         jitter = round(max_rtt - min_rtt, 1)
     else:
         m_times = re.search(
-            r"Minimum\s*=\s*(\d+)ms,\s*Maximum\s*=\s*(\d+)ms,\s*Average\s*=\s*(\d+)ms",
+            r"(?:Minimum|最短|最小值)\s*=\s*(\d+)ms.*?(?:Maximum|最长|最大值)\s*=\s*(\d+)ms.*?(?:Average|平均)\s*=\s*(\d+)ms",
             out,
             re.IGNORECASE,
         )
@@ -155,25 +196,28 @@ async def ping_target(host: str, burst_count: int, timeout_ms: int) -> dict[str,
     }
 
 
-def _sync_tcp_probe(host: str, port: int, timeout_sec: float) -> tuple[bool, float]:
-    """Synchronous socket connection probe measuring SYN-ACK RTT."""
+async def test_tcp_handshake(host: str, port: int, timeout_ms: int) -> tuple[bool, float]:
+    """Perform non-blocking TCP 3-way handshake measurement with guaranteed socket closure."""
     if not port or port <= 0:
         return False, -1.0
     start = time.perf_counter()
+    writer = None
     try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(timeout_sec)
-        s.connect((host, port))
+        _, writer = await asyncio.wait_for(
+            asyncio.open_connection(host, port),
+            timeout=timeout_ms / 1000.0,
+        )
         elapsed = (time.perf_counter() - start) * 1000.0
-        s.close()
         return True, round(elapsed, 1)
     except Exception:
         return False, -1.0
-
-
-async def test_tcp_handshake(host: str, port: int, timeout_ms: int) -> tuple[bool, float]:
-    """Perform non-blocking TCP 3-way handshake measurement."""
-    return await asyncio.to_thread(_sync_tcp_probe, host, port, timeout_ms / 1000.0)
+    finally:
+        if writer is not None:
+            try:
+                writer.close()
+                await writer.wait_closed()
+            except Exception:
+                pass
 
 
 def _run_tracert_thread(host: str, target_name: str, max_hops: int, trace_dir: Path) -> None:
@@ -200,6 +244,8 @@ class NetworkMonitor:
         self.trace_dir = Path(self.config.get("paths", {}).get("trace_dir", "traces"))
         self.last_trace_time: dict[str, float] = {}
         self.global_last_trace_time: float = 0.0
+        self.cached_gateway: str | None = None
+        self.baseline_rtt: dict[str, float] = {}
         self.tracked_games = load_tracked_games(self.config_path)
 
         if log_path:
@@ -229,38 +275,50 @@ class NetworkMonitor:
                 writer = csv.writer(f)
                 writer.writerow(CSV_HEADERS)
 
-    def resolve_targets(self, include_live_game_ips: bool = True) -> list[dict[str, Any]]:
-        """Build target list, resolving auto gateway and running game endpoints."""
+    def get_local_gateway(self) -> str:
+        """Get or detect the default IPv4 gateway with caching."""
+        if self.cached_gateway is None:
+            raw_gw = self.config.get("targets", {}).get("local_gateway", "auto")
+            self.cached_gateway = detect_local_gateway() if raw_gw == "auto" else str(raw_gw)
+        return self.cached_gateway
+
+    def resolve_targets(
+        self,
+        running_games: list[dict[str, Any]] | None = None,
+        game_connections: list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Build target list, resolving cached gateway and running game endpoints."""
         raw_targets = self.config.get("targets", {})
         targets = []
 
         # Local Gateway
-        gw = raw_targets.get("local_gateway", "auto")
-        if gw == "auto":
-            gw = detect_local_gateway()
         targets.append({
             "name": "Local-Gateway",
-            "host": gw,
+            "host": self.get_local_gateway(),
             "type": "control_local",
             "port": 0,
         })
 
         # Global Control
         gc = raw_targets.get("global_control", "1.1.1.1")
+        gc_host = gc.get("host", "1.1.1.1") if isinstance(gc, dict) else str(gc)
+        gc_port = gc.get("port", 53) if isinstance(gc, dict) else 53
         targets.append({
             "name": "Global-Cloudflare",
-            "host": gc,
+            "host": gc_host,
             "type": "control_global",
-            "port": 53,
+            "port": gc_port,
         })
 
-        # Asia Pacific Transit Control
+        # Asia Pacific Transit Control (defaults port to 0 since transit routers do not host HTTPS)
         asia = raw_targets.get("asia_transit_control", "20.210.150.1")
+        asia_host = asia.get("host", "20.210.150.1") if isinstance(asia, dict) else str(asia)
+        asia_port = asia.get("port", 0) if isinstance(asia, dict) else 0
         targets.append({
             "name": "Transit-AsiaEast",
-            "host": asia,
+            "host": asia_host,
             "type": "control_transit",
-            "port": 443,
+            "port": asia_port,
         })
 
         # Configured miHoYo Endpoints
@@ -273,28 +331,37 @@ class NetworkMonitor:
             })
 
         # Dynamically discover running game active server socket IPs
-        if include_live_game_ips:
-            running = get_running_games(config_path=self.config_path, tracked_games=self.tracked_games)
-            if running:
-                conns = get_game_connections(running)
-                seen_hosts = {t["host"] for t in targets}
-                for c in conns:
-                    ip = c["remote_ip"]
-                    if ip not in seen_hosts:
-                        seen_hosts.add(ip)
-                        short_name = c["game_name"].split()[0]
-                        targets.append({
-                            "name": f"LiveGame-{short_name}-{c['protocol']}",
-                            "host": ip,
-                            "type": "mihoyo_live_game",
-                            "port": c["remote_port"] if c["protocol"] == "TCP" else 0,
-                        })
+        if running_games:
+            conns = (
+                game_connections
+                if game_connections is not None
+                else get_game_connections(running_games)
+            )
+            seen_hosts = {t["host"] for t in targets}
+            for c in conns:
+                ip = c["remote_ip"]
+                if ip not in seen_hosts:
+                    seen_hosts.add(ip)
+                    short_name = c["game_name"].split()[0]
+                    targets.append({
+                        "name": f"LiveGame-{short_name}-{c['protocol']}",
+                        "host": ip,
+                        "type": "mihoyo_live_game",
+                        "port": c["remote_port"] if c["protocol"] == "TCP" else 0,
+                    })
 
         return targets
 
-    def get_current_active_game_label(self) -> str:
+    def get_current_active_game_label(
+        self,
+        running_games: list[dict[str, Any]] | None = None,
+    ) -> str:
         """Return the name of currently running game or 'None'."""
-        running = get_running_games(config_path=self.config_path, tracked_games=self.tracked_games)
+        running = (
+            running_games
+            if running_games is not None
+            else get_running_games(config_path=self.config_path, tracked_games=self.tracked_games)
+        )
         if not running:
             return "None"
         names = [r["game_name"].split()[0] for r in running]
@@ -307,8 +374,12 @@ class NetworkMonitor:
         ping_timeout = sampling.get("ping_timeout_ms", 1000)
         tcp_timeout = sampling.get("tcp_timeout_ms", 2000)
 
-        targets = self.resolve_targets(include_live_game_ips=True)
-        active_game = self.get_current_active_game_label()
+        # Asynchronously scan processes and sockets in worker thread without blocking the event loop
+        running = await asyncio.to_thread(get_running_games, self.config_path, self.tracked_games)
+        conns = await asyncio.to_thread(get_game_connections, running) if running else []
+
+        targets = self.resolve_targets(running_games=running, game_connections=conns)
+        active_game = self.get_current_active_game_label(running_games=running)
 
         now_local = datetime.now()
         now_cst = datetime.now(CST_TZ)
@@ -363,6 +434,7 @@ class NetworkMonitor:
         """Detect if miHoYo edge targets degraded while local gateway is healthy."""
         anomaly_cfg = self.config.get("anomaly_trigger", {})
         loss_thresh = anomaly_cfg.get("loss_threshold_pct", 20.0)
+        rtt_spike_thresh = anomaly_cfg.get("rtt_spike_threshold_ms", 80.0)
         cooldown = anomaly_cfg.get("trace_cooldown_seconds", 300)
         max_hops = anomaly_cfg.get("max_hops", 25)
 
@@ -390,15 +462,28 @@ class NetworkMonitor:
                 host = row["target_host"]
                 name = row["target_name"]
 
-                is_anomaly = (loss >= loss_thresh) or (avg_rtt > 0 and avg_rtt >= 300.0)
+                if avg_rtt > 0:
+                    current_base = self.baseline_rtt.get(host)
+                    if current_base is None or avg_rtt < current_base:
+                        self.baseline_rtt[host] = avg_rtt
+
+                baseline = self.baseline_rtt.get(host, avg_rtt)
+                rtt_spike = (avg_rtt - baseline) if (avg_rtt > 0 and baseline > 0) else 0.0
+
+                is_anomaly = (loss >= loss_thresh) or (rtt_spike >= rtt_spike_thresh) or (avg_rtt >= 350.0)
                 if is_anomaly:
                     last_time = self.last_trace_time.get(host, 0.0)
                     if now_ts - last_time >= cooldown:
                         self.last_trace_time[host] = now_ts
                         self.global_last_trace_time = now_ts
                         row["anomaly_triggered"] = True
+                        reason = (
+                            f"Loss={loss}%"
+                            if loss >= loss_thresh
+                            else f"RTT Spike=+{rtt_spike:.1f}ms (Avg={avg_rtt:.1f}ms, Base={baseline:.1f}ms)"
+                        )
                         print(
-                            f"\n[!] ANOMALY DETECTED on {name} ({host}): Loss={loss}%, AvgRTT={avg_rtt}ms. "
+                            f"\n[!] ANOMALY DETECTED on {name} ({host}): {reason}. "
                             f"Spawning background traceroute snapshot..."
                         )
                         t = threading.Thread(
@@ -410,32 +495,12 @@ class NetworkMonitor:
                         break  # Launch at most 1 traceroute per cycle
 
     def _save_to_csv(self, cycle_data: list[dict[str, Any]]) -> None:
-        """Append rows to CSV file with flush."""
+        """Append rows to CSV file using DictWriter to prevent column drift."""
         try:
             with open(self.log_file, "a", newline="", encoding="utf-8") as f:
-                writer = csv.writer(f)
+                writer = csv.DictWriter(f, fieldnames=CSV_HEADERS, extrasaction="ignore")
                 for r in cycle_data:
-                    writer.writerow([
-                        r["timestamp_local"],
-                        r["timestamp_cst"],
-                        r["cst_hour"],
-                        r["is_cst_peak"],
-                        r["active_game"],
-                        r["target_name"],
-                        r["target_host"],
-                        r["target_type"],
-                        r["packets_sent"],
-                        r["packets_recv"],
-                        r["loss_pct"],
-                        r["min_rtt_ms"],
-                        r["avg_rtt_ms"],
-                        r["max_rtt_ms"],
-                        r["jitter_ms"],
-                        r["tcp_port"],
-                        r["tcp_success"],
-                        r["tcp_handshake_ms"],
-                        r["anomaly_triggered"],
-                    ])
+                    writer.writerow(r)
                 f.flush()
         except Exception as e:
             print(f"Error saving to CSV: {e}", file=sys.stderr)
@@ -450,7 +515,7 @@ def print_cycle_summary(cycle_data: list[dict[str, Any]]) -> None:
     headers = ["Target", "Host", "Loss%", "RTT (Min/Avg/Max)", "Jitter", "TCP Handshake"]
     col_w = [23, 16, 8, 22, 10, 15]
 
-    header_line = " | ".join(h.ljust(col_w[i]) for i, h in enumerate(headers))
+    header_line = " | ".join(cjk_ljust(h, col_w[i]) for i, h in enumerate(headers))
     sep_line = "-+-".join("-" * col_w[i] for i in range(len(headers)))
     print(header_line)
     print(sep_line)
@@ -474,7 +539,7 @@ def print_cycle_summary(cycle_data: list[dict[str, Any]]) -> None:
             jitter_str,
             tcp_str,
         ]
-        line = " | ".join(cell.ljust(col_w[i]) for i, cell in enumerate(row))
+        line = " | ".join(cjk_ljust(cell, col_w[i]) for i, cell in enumerate(row))
         print(line)
 
 

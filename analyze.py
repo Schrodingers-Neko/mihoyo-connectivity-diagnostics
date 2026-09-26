@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import argparse
 import csv
+import html
 import json
 import math
 import sys
+import unicodedata
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -24,6 +26,22 @@ if sys.platform == "win32":
         sys.stderr.reconfigure(encoding="utf-8", errors="replace")
     except Exception:
         pass
+
+
+def cjk_display_width(val: Any) -> int:
+    """Calculate monospaced terminal display width accounting for East Asian full-width characters."""
+    width = 0
+    for ch in str(val):
+        w = unicodedata.east_asian_width(ch)
+        width += 2 if w in ("W", "F") else 1
+    return width
+
+
+def cjk_ljust(val: Any, width: int) -> str:
+    """Pad string to target terminal display width considering CJK characters."""
+    s = str(val)
+    cw = cjk_display_width(s)
+    return s + (" " * max(0, width - cw))
 
 
 def safe_float(val: Any, default: float = 0.0) -> float:
@@ -53,8 +71,7 @@ def find_log_files(log_path: str | None = None, log_dir: str = "logs", load_all:
 
     files = list(dir_path.glob("connectivity*.csv"))
     if not files:
-        legacy = dir_path / "connectivity.csv"
-        return [legacy] if legacy.is_file() else []
+        return []
 
     # Sort descending by modified time (latest first)
     files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
@@ -74,6 +91,14 @@ class ConnectivityAnalyzer:
         self.source_files = find_log_files(log_path=log_path, load_all=load_all)
         self.records: list[dict[str, Any]] = []
         self._load_records()
+
+    def get_trace_snapshots(self) -> list[Path]:
+        """List available traceroute snapshot files in trace_dir."""
+        if not self.trace_dir.is_dir():
+            return []
+        traces = list(self.trace_dir.glob("trace_*.txt"))
+        traces.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        return traces
 
     def _load_records(self) -> None:
         for fpath in self.source_files:
@@ -103,6 +128,9 @@ class ConnectivityAnalyzer:
                         "tcp_handshake_ms": safe_float(row.get("tcp_handshake_ms"), -1.0),
                         "anomaly_triggered": row.get("anomaly_triggered", "False").lower() == "true",
                     })
+
+        # Ensure records are strictly ordered chronologically
+        self.records.sort(key=lambda r: r.get("timestamp_local", ""))
 
     def aggregate_by_target(self) -> dict[str, dict[str, Any]]:
         groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -287,7 +315,7 @@ class ConnectivityAnalyzer:
                 "action_zh": "建议订购网易UU加速器或雷神加速器（可优先领取免费试用时长测试）。",
             }
 
-        # Rule 3: Pristine connection
+        # Rule 3a: Pristine low-latency connection
         if avg_mihoyo_loss < 3.0 and avg_mihoyo_rtt > 0 and avg_mihoyo_rtt < 260.0:
             return {
                 "verdict": "DO_NOT_BUY_EXCELLENT_CONNECTION",
@@ -313,13 +341,49 @@ class ConnectivityAnalyzer:
                 "action_zh": "暂无须购买；待出现明显卡顿或重连时再行检测。",
             }
 
+        # Rule 3b: Stable trans-oceanic route with high physical distance latency (e.g. US East to China)
+        if avg_mihoyo_loss < 3.0 and avg_mihoyo_rtt >= 260.0:
+            return {
+                "verdict": "DO_NOT_BUY_HIGH_RTT_STABLE",
+                "badge_en": "DO NOT BUY (STABLE HIGH RTT)",
+                "badge_zh": "无需购买 (稳定物理远距延时)",
+                "summary_en": f"Stable direct connection with expected long-distance trans-oceanic transit latency (Loss: {avg_mihoyo_loss:.1f}%, Avg RTT: {avg_mihoyo_rtt:.1f}ms).",
+                "summary_zh": f"跨洋直连链路稳定，时延主要由地理物理距离所致（丢包率: {avg_mihoyo_loss:.1f}%，平均时延: {avg_mihoyo_rtt:.1f}ms）。",
+                "details": [
+                    {
+                        "en": f"Packet loss is zero or minimal ({avg_mihoyo_loss:.1f}%), indicating clean transit queues without congested packet drops.",
+                        "zh": f"丢包率接近零或极低（{avg_mihoyo_loss:.1f}%），表明骨干路由没有拥堵丢包。",
+                    },
+                    {
+                        "en": f"High RTT ({avg_mihoyo_rtt:.1f}ms) reflects geographic distance across trans-Pacific fiber; an accelerator cannot beat the physical speed of light in glass.",
+                        "zh": f"高时延（{avg_mihoyo_rtt:.1f}ms）系跨太平洋海底光缆物理传播距离所致；游戏加速器无法突破光纤光速物理极限。",
+                    },
+                    {
+                        "en": "Accelerators only improve routing stability if packet loss or route flapping occurs during peak hours.",
+                        "zh": "仅当晚高峰出现路由抖动或持续丢包时，加速器专线才有优化价值。",
+                    },
+                ],
+                "action_en": "Play directly without accelerator; monitor during China peak hours (19:00-23:00 CST).",
+                "action_zh": "可直接裸连游玩；建议在北京时间晚高峰（19:00~23:00）再次观测是否有拥堵丢包。",
+            }
+
         # Default fallback: Mild degradation
+        loss_desc_en = (
+            f"Mild packet loss detected ({avg_mihoyo_loss:.1f}%), but below definitive threshold."
+            if avg_mihoyo_loss > 0.0
+            else f"Borderline metrics observed (Avg RTT: {avg_mihoyo_rtt:.1f}ms, Loss: {avg_mihoyo_loss:.1f}%)."
+        )
+        loss_desc_zh = (
+            f"检测到轻度丢包与波动（{avg_mihoyo_loss:.1f}%），未达购买必要阈值。"
+            if avg_mihoyo_loss > 0.0
+            else f"检测到边界指标状态（平均时延: {avg_mihoyo_rtt:.1f}ms，丢包率: {avg_mihoyo_loss:.1f}%）。"
+        )
         return {
             "verdict": "MONITORING_SUGGESTED",
             "badge_en": "BORDERLINE / CONTINUE MONITORING",
             "badge_zh": "中度波动 / 建议继续观察",
-            "summary_en": f"Mild packet loss detected ({avg_mihoyo_loss:.1f}%), but below definitive threshold.",
-            "summary_zh": f"检测到轻度丢包与波动（{avg_mihoyo_loss:.1f}%），未达购买必要阈值。",
+            "summary_en": loss_desc_en,
+            "summary_zh": loss_desc_zh,
             "details": [
                 {
                     "en": f"Local network is stable ({local_loss}% loss).",
@@ -358,7 +422,7 @@ class ConnectivityAnalyzer:
 
         headers = ["Target", "Host", "Loss%", "Avg RTT", "Jitter", "TCP%", "CST Peak Loss", "Off-Peak Loss"]
         col_w = [22, 16, 8, 10, 8, 8, 14, 14]
-        h_line = " | ".join(h.ljust(col_w[i]) for i, h in enumerate(headers))
+        h_line = " | ".join(cjk_ljust(h, col_w[i]) for i, h in enumerate(headers))
         s_line = "-+-".join("-" * col_w[i] for i in range(len(headers)))
         print(h_line)
         print(s_line)
@@ -380,7 +444,7 @@ class ConnectivityAnalyzer:
                 peak_str,
                 offpeak_str,
             ]
-            print(" | ".join(cell.ljust(col_w[i]) for i, cell in enumerate(row)))
+            print(" | ".join(cjk_ljust(cell, col_w[i]) for i, cell in enumerate(row)))
 
         print("\n" + "-" * 78)
         print("  2. ACCELERATOR BUYING VERDICT / 选购评估结论")
@@ -399,6 +463,17 @@ class ConnectivityAnalyzer:
                 print(f"  * {d}")
         print(f"\nRecommended Action (ZH): {decision.get('action_zh', '')}")
         print(f"Recommended Action (EN): {decision.get('action_en', '')}\n")
+
+        traces = self.get_trace_snapshots()
+        if traces:
+            print("-" * 78)
+            print(f"  3. TRACEROUTE SNAPSHOTS / 路由诊断快照 ({len(traces)} captured)")
+            print("-" * 78)
+            for t in traces[:3]:
+                print(f"  * {t.name}")
+            if len(traces) > 3:
+                print(f"    ... and {len(traces) - 3} more snapshot(s) in {self.trace_dir}/")
+            print()
         print("=" * 78)
 
     def generate_html_report(self, output_path: str | None = None) -> tuple[Path, Path]:
@@ -412,12 +487,12 @@ class ConnectivityAnalyzer:
         stats = self.aggregate_by_target()
         decision = self.evaluate_decision_matrix()
 
-        badge_en = decision.get("badge_en", "")
-        badge_zh = decision.get("badge_zh", "")
-        summary_en = decision.get("summary_en", "")
-        summary_zh = decision.get("summary_zh", "")
-        action_en = decision.get("action_en", "")
-        action_zh = decision.get("action_zh", "")
+        badge_en = html.escape(str(decision.get("badge_en", "")))
+        badge_zh = html.escape(str(decision.get("badge_zh", "")))
+        summary_en = html.escape(str(decision.get("summary_en", "")))
+        summary_zh = html.escape(str(decision.get("summary_zh", "")))
+        action_en = html.escape(str(decision.get("action_en", "")))
+        action_zh = html.escape(str(decision.get("action_zh", "")))
 
         badge_color = "#10b981" if "HEALTHY" in badge_en else (
             "#ef4444" if "BUY ACCELERATOR" in badge_en else "#f59e0b"
@@ -428,13 +503,16 @@ class ConnectivityAnalyzer:
             rtt = f"{s['avg_rtt_ms']} ms" if s["avg_rtt_ms"] >= 0 else "TIMEOUT"
             jitter = f"{s['avg_jitter_ms']} ms" if s["avg_jitter_ms"] >= 0 else "-"
             loss_color = "#10b981" if s["loss_pct"] < 5 else ("#f59e0b" if s["loss_pct"] < 15 else "#ef4444")
+            tcp_display = f"{s['tcp_rate']:.0f}%" if s["tcp_rate"] >= 0 else "N/A"
+            safe_name = html.escape(str(name))
+            safe_host = html.escape(str(s['target_host']))
             rows_html += f"""
             <tr>
-                <td><strong>{name}</strong><br><small style="color:#64748b;">{s['target_host']}</small></td>
+                <td><strong>{safe_name}</strong><br><small style="color:#64748b;">{safe_host}</small></td>
                 <td><span style="color:{loss_color};font-weight:600;">{s['loss_pct']:.1f}%</span></td>
                 <td>{rtt}</td>
                 <td>{jitter}</td>
-                <td>{s['tcp_rate']:.0f}%</td>
+                <td>{tcp_display}</td>
                 <td>{s['peak_loss']:.1f}% <small style="color:#64748b;">({s['peak_samples']})</small></td>
                 <td>{s['offpeak_loss']:.1f}% <small style="color:#64748b;">({s['offpeak_samples']})</small></td>
             </tr>
@@ -443,17 +521,41 @@ class ConnectivityAnalyzer:
         details_html = ""
         for d in decision.get("details", []):
             if isinstance(d, dict):
+                d_zh = html.escape(str(d.get("zh", "")))
+                d_en = html.escape(str(d.get("en", "")))
                 details_html += f"""
                 <li>
-                    <span class="zh">{d.get('zh', '')}</span>
-                    <span class="en">{d.get('en', '')}</span>
+                    <span class="zh">{d_zh}</span>
+                    <span class="en">{d_en}</span>
                 </li>
                 """
             else:
-                details_html += f"<li>{d}</li>"
+                details_html += f"<li>{html.escape(str(d))}</li>"
 
-        source_files_str = ", ".join(f.name for f in self.source_files) if self.source_files else "None"
-        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        source_files_str = html.escape(", ".join(f.name for f in self.source_files) if self.source_files else "None")
+        now_str = html.escape(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+
+        traces = self.get_trace_snapshots()
+        traces_html = ""
+        if traces:
+            traces_items = "".join(f"<li><code>{html.escape(t.name)}</code></li>" for t in traces[:5])
+            more_str = (
+                f"<p style='color:#94a3b8;font-size:13px;'>... and {len(traces) - 5} more snapshot(s) in <code>{html.escape(str(self.trace_dir))}</code></p>"
+                if len(traces) > 5
+                else ""
+            )
+            traces_html = f"""
+  <div class="card">
+    <h2 style="margin-top:0; font-size:18px;">
+      <span class="zh">路由诊断快照 ({len(traces)} 份)</span>
+      <span class="en">Captured Traceroute Snapshots ({len(traces)})</span>
+    </h2>
+    <ul style="font-family:monospace; font-size:13px; color:#38bdf8;">
+      {traces_items}
+    </ul>
+    {more_str}
+  </div>
+"""
 
         html_content = f"""<!DOCTYPE html>
 <html lang="zh-CN">
@@ -561,6 +663,7 @@ class ConnectivityAnalyzer:
       </tbody>
     </table>
   </div>
+{traces_html}
 </div>
 </body>
 </html>"""

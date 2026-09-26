@@ -10,6 +10,7 @@ import argparse
 import json
 import sys
 import time
+import unicodedata
 from pathlib import Path
 from typing import Any
 
@@ -27,17 +28,33 @@ if sys.platform == "win32":
         pass
 
 
+def cjk_display_width(val: Any) -> int:
+    """Calculate monospaced terminal display width accounting for East Asian full-width characters."""
+    width = 0
+    for ch in str(val):
+        w = unicodedata.east_asian_width(ch)
+        width += 2 if w in ("W", "F") else 1
+    return width
+
+
+def cjk_ljust(val: Any, width: int) -> str:
+    """Pad string to target terminal display width considering CJK characters."""
+    s = str(val)
+    cw = cjk_display_width(s)
+    return s + (" " * max(0, width - cw))
+
+
 def format_table(headers: list[str], rows: list[list[str]]) -> str:
-    """Format a clean plain-text table."""
-    col_widths = [len(h) for h in headers]
+    """Format a clean plain-text table with correct CJK full-width alignment."""
+    col_widths = [cjk_display_width(h) for h in headers]
     for row in rows:
         for i, cell in enumerate(row):
-            col_widths[i] = max(col_widths[i], len(str(cell)))
+            col_widths[i] = max(col_widths[i], cjk_display_width(cell))
 
-    header_line = " | ".join(h.ljust(col_widths[i]) for i, h in enumerate(headers))
+    header_line = " | ".join(cjk_ljust(h, col_widths[i]) for i, h in enumerate(headers))
     sep_line = "-+-".join("-" * col_widths[i] for i in range(len(headers)))
     row_lines = [
-        " | ".join(str(cell).ljust(col_widths[i]) for i, cell in enumerate(row))
+        " | ".join(cjk_ljust(cell, col_widths[i]) for i, cell in enumerate(row))
         for row in rows
     ]
     return f"{header_line}\n{sep_line}\n" + "\n".join(row_lines)
@@ -60,8 +77,8 @@ def add_endpoint_to_config(
 
     endpoints = data.setdefault("targets", {}).setdefault("mihoyo_endpoints", [])
     for ep in endpoints:
-        if ep.get("host") == host:
-            print(f"Endpoint {host} already exists in {config_path} as '{ep.get('name')}'.")
+        if ep.get("host") == host and ep.get("port") == port:
+            print(f"Endpoint {host}:{port} already exists in {config_path} as '{ep.get('name')}'.")
             return False
 
     endpoints.append({"name": name, "host": host, "port": port})
@@ -139,17 +156,17 @@ def main() -> None:
     args = parser.parse_args()
 
     tracked_games = load_tracked_games(args.config)
+    connections: list[dict[str, Any]] = []
 
     if args.watch:
         try:
             while True:
-                display_status(tracked_games, args.config)
+                connections = display_status(tracked_games, args.config)
                 time.sleep(3)
         except KeyboardInterrupt:
-            print("\nStopped.")
-            return
-
-    connections = display_status(tracked_games, args.config)
+            print("\nStopped watch mode.")
+    else:
+        connections = display_status(tracked_games, args.config)
 
     if args.json:
         print(json.dumps(connections, indent=2))
@@ -161,7 +178,8 @@ def main() -> None:
             if c["remote_ip"] not in ("127.0.0.1", "0.0.0.0"):
                 clean_name = c["game_name"].split()[0]
                 name = f"{clean_name}-{c['protocol']}-{c['remote_port']}"
-                port = c["remote_port"] if c["protocol"] == "TCP" else 443
+                # TCP endpoints use their actual port; UDP endpoints use port 0 to prevent bogus TCP connection attempts
+                port = c["remote_port"] if c["protocol"] == "TCP" else 0
                 if add_endpoint_to_config(name, c["remote_ip"], port, args.config):
                     added_count += 1
         if added_count:
